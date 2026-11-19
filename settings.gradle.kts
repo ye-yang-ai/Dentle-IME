@@ -23,3 +23,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "Dental IME"
+include(":app")
