@@ -14,8 +14,11 @@ internal object SentenceComposer {
         val text: String,
         val score: Double,
         val words: Int,
-        val lastWord: String
+        val lastWord: String,
+        val tail: SegmentNode?
     )
+
+    private data class SegmentNode(val segment: PinyinSegment, val previous: SegmentNode?)
 
     fun compose(
         input: String,
@@ -24,7 +27,7 @@ internal object SentenceComposer {
         limit: Int
     ): List<PinyinCandidate> {
         val paths = Array(input.length + 1) { mutableListOf<Path>() }
-        paths[0].add(Path("", 0.0, 0, ""))
+        paths[0].add(Path("", 0.0, 0, "", null))
 
         for (start in input.indices) {
             if (paths[start].isEmpty()) continue
@@ -41,7 +44,8 @@ internal object SentenceComposer {
                                 path.text + word.word,
                                 path.score + ln(word.rank.toDouble() + 1) - WORD_PENALTY + contextBonus,
                                 path.words + 1,
-                                word.word
+                                word.word,
+                                SegmentNode(PinyinSegment(start, end, word.word), path.tail)
                             )
                         )
                     }
@@ -56,7 +60,15 @@ internal object SentenceComposer {
             .sortedByDescending { it.score }
             .distinctBy { it.text }
             .take(limit)
-            .map { PinyinCandidate(it.text, input) }
+            .map { path ->
+                val segments = mutableListOf<PinyinSegment>()
+                var node = path.tail
+                while (node != null) {
+                    segments.add(node.segment)
+                    node = node.previous
+                }
+                PinyinCandidate(path.text, input, segments.asReversed())
+            }
             .toList()
     }
 

@@ -11,6 +11,7 @@ import android.text.InputType
 import android.util.Log
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.HorizontalScrollView
@@ -28,10 +29,16 @@ class DentalImeService : InputMethodService() {
     private var keyRows: LinearLayout? = null
     private var renderedMode = -1
     private var compositionLabel: TextView? = null
+    private var segmentStrip: HorizontalScrollView? = null
+    private var segmentRow: LinearLayout? = null
     private var candidateStrip: HorizontalScrollView? = null
+    private var editBackLabel: TextView? = null
     private val candidateLabels = mutableListOf<TextView>()
     private val composition = StringBuilder()
     private var candidates = emptyList<PinyinCandidate>()
+    private var sentenceDraft: PinyinCandidate? = null
+    private var draftEdited = false
+    private var editingSegment: Int? = null
     private var dictionary: PinyinDictionary? = null
     private var dictionaryFailed = false
     private var destroyed = false
@@ -94,6 +101,7 @@ class DentalImeService : InputMethodService() {
         shifted = false
         composition.clear()
         candidates = emptyList()
+        clearSentenceDraft()
         pendingKeys.clear()
         lookupPending = false
         candidateGeneration++
@@ -112,6 +120,7 @@ class DentalImeService : InputMethodService() {
         super.onFinishInput()
         composition.clear()
         candidates = emptyList()
+        clearSentenceDraft()
         pendingKeys.clear()
         lookupPending = false
         candidateGeneration++
@@ -162,17 +171,44 @@ class DentalImeService : InputMethodService() {
             addView(it, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(26)))
         }
 
+        segmentStrip = HorizontalScrollView(this@DentalImeService).apply {
+            isHorizontalScrollBarEnabled = false
+            isFillViewport = true
+        }.also { strip ->
+            segmentRow = LinearLayout(this@DentalImeService).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }.also { row ->
+                strip.addView(row, ViewGroup.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.MATCH_PARENT
+                ))
+            }
+            addView(strip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(36)))
+        }
+
         val strip = HorizontalScrollView(this@DentalImeService).apply {
             isHorizontalScrollBarEnabled = false
             isFillViewport = true
         }
         candidateStrip = strip
         val row = LinearLayout(this@DentalImeService).apply { orientation = LinearLayout.HORIZONTAL }
+        editBackLabel = candidateLabel().apply {
+            text = "‹"
+            textSize = 28f
+            contentDescription = "返回整句候选"
+            setOnClickListener {
+                editingSegment = null
+                updateCandidates()
+            }
+        }.also(row::addView)
         candidateLabels.clear()
         repeat(11) {
             candidateLabels.add(candidateLabel().also { row.addView(it) })
         }
-        strip.addView(row)
+        strip.addView(row, ViewGroup.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.MATCH_PARENT
+        ))
         addView(strip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)))
     }
 
@@ -190,14 +226,43 @@ class DentalImeService : InputMethodService() {
 
     private fun updateCandidateViews() {
         compositionLabel?.text = composition.toString()
+        val draft = sentenceDraft
+        segmentRow?.apply {
+            removeAllViews()
+            draft?.segments?.forEachIndexed { index, segment ->
+                addView(TextView(this@DentalImeService).apply {
+                    text = segment.word
+                    textSize = 18f
+                    gravity = Gravity.CENTER
+                    setTextColor(Color.rgb(24, 39, 42))
+                    setPadding(dp(10), 0, dp(10), 0)
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(4).toFloat()
+                        setColor(if (editingSegment == index) Color.rgb(140, 198, 189)
+                            else Color.rgb(206, 220, 217))
+                    }
+                    contentDescription = "修改${segment.word}，拼音${draft.pinyin.substring(segment.start, segment.end)}"
+                    setOnClickListener {
+                        editingSegment = index
+                        updateCandidates()
+                    }
+                }, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, dp(32)
+                ).apply { setMargins(dp(2), dp(2), dp(2), dp(2)) })
+            }
+        }
+        editBackLabel?.visibility = if (editingSegment != null) View.VISIBLE else View.GONE
         candidateLabels.forEachIndexed { index, label ->
             val candidate = candidates.getOrNull(index)
-            val raw = index == candidates.size && composition.isNotEmpty()
+            val raw = editingSegment == null && index == candidates.size && composition.isNotEmpty()
             when {
                 candidate != null -> {
                     label.text = candidate.word
                     label.contentDescription = "${candidate.word}，${candidate.pinyin}"
-                    label.setOnClickListener { commitComposition(candidate.word, rememberSelection = true) }
+                    label.setOnClickListener {
+                        if (editingSegment != null) replaceDraftSegment(candidate.word)
+                        else commitComposition(candidate.word, rememberSelection = true)
+                    }
                     label.visibility = View.VISIBLE
                 }
                 raw -> {
@@ -217,6 +282,8 @@ class DentalImeService : InputMethodService() {
         val input = composition.toString()
         val generation = ++candidateGeneration
         val loaded = dictionary
+        val segment = editingSegment?.let { sentenceDraft?.segments?.getOrNull(it) }
+        val lookupInput = segment?.let { input.substring(it.start, it.end) } ?: input
         candidates = emptyList()
         updateCandidateViews()
         if (input.isEmpty() || loaded == null) {
@@ -228,12 +295,26 @@ class DentalImeService : InputMethodService() {
         lookupPending = true
         dictionaryWorker.queue.clear()
         dictionaryWorker.execute {
-            val result = runCatching { loaded.lookup(input) }
+            val result = runCatching {
+                if (segment != null) loaded.lookupExact(lookupInput)
+                else loaded.lookup(input)
+            }
             result.exceptionOrNull()?.let { Log.e("DentalImeService", "Candidate lookup failed", it) }
             mainHandler.post {
                 if (destroyed || generation != candidateGeneration) return@post
                 lookupPending = false
-                candidates = result.getOrDefault(emptyList())
+                val found = result.getOrDefault(emptyList())
+                if (segment != null) {
+                    candidates = found
+                } else {
+                    val edited = sentenceDraft?.takeIf { draftEdited && it.pinyin == input }
+                    candidates = if (edited != null) {
+                        listOf(edited) + found.filter { it.word != edited.word }.take(9)
+                    } else found
+                    if (edited == null) {
+                        sentenceDraft = found.firstOrNull { it.segments.size > 1 }
+                    }
+                }
                 updateCandidateViews()
                 drainPendingKeys()
             }
@@ -247,17 +328,37 @@ class DentalImeService : InputMethodService() {
     }
 
     private fun commitComposition(
-        value: String = candidates.firstOrNull()?.word ?: composition.toString(),
+        value: String = if (editingSegment != null || draftEdited)
+            sentenceDraft?.word ?: composition.toString()
+        else candidates.firstOrNull()?.word ?: composition.toString(),
         rememberSelection: Boolean = false
     ) {
         if (composition.isEmpty()) return
-        if (rememberSelection && candidates.any { it.word == value }) {
+        if (rememberSelection && (sentenceDraft?.word == value || candidates.any { it.word == value })) {
             dictionary?.recordSelection(composition.toString(), value)
         }
         currentInputConnection?.commitText(value, 1)
         composition.clear()
         candidates = emptyList()
+        clearSentenceDraft()
         updateCandidateViews()
+    }
+
+    private fun replaceDraftSegment(word: String) {
+        val index = editingSegment ?: return
+        val draft = sentenceDraft ?: return
+        val segment = draft.segments[index]
+        sentenceDraft = draft.replaceSegment(index, word)
+        draftEdited = true
+        editingSegment = null
+        dictionary?.recordSelection(draft.pinyin.substring(segment.start, segment.end), word)
+        updateCandidates()
+    }
+
+    private fun clearSentenceDraft() {
+        sentenceDraft = null
+        draftEdited = false
+        editingSegment = null
     }
 
     private fun LinearLayout.addKeyRow(labels: List<String>) {
@@ -329,6 +430,7 @@ class DentalImeService : InputMethodService() {
             }
             "⌫" -> {
                 if (composition.isNotEmpty()) {
+                    clearSentenceDraft()
                     composition.deleteCharAt(composition.lastIndex)
                     if (composition.isEmpty()) currentInputConnection?.commitText("", 1)
                     else currentInputConnection?.setComposingText(composition.toString(), 1)
@@ -351,11 +453,14 @@ class DentalImeService : InputMethodService() {
                 else currentInputConnection?.commitText("\n", 1)
             }
             "space" -> {
-                if (composition.isNotEmpty()) commitComposition(rememberSelection = true)
+                if (editingSegment != null && candidates.isNotEmpty()) {
+                    replaceDraftSegment(candidates.first().word)
+                } else if (composition.isNotEmpty()) commitComposition(rememberSelection = true)
                 else currentInputConnection?.commitText(" ", 1)
             }
             else -> {
                 if (composingLetter) {
+                    clearSentenceDraft()
                     composition.append(label)
                     currentInputConnection?.setComposingText(composition.toString(), 1)
                     updateCandidates()

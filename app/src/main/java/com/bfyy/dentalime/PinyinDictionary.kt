@@ -5,7 +5,19 @@ import android.database.sqlite.SQLiteDatabase
 import java.io.Closeable
 import java.io.File
 
-data class PinyinCandidate(val word: String, val pinyin: String)
+data class PinyinSegment(val start: Int, val end: Int, val word: String)
+
+data class PinyinCandidate(
+    val word: String,
+    val pinyin: String,
+    val segments: List<PinyinSegment> = emptyList()
+) {
+    fun replaceSegment(index: Int, replacement: String): PinyinCandidate {
+        val updated = segments.toMutableList()
+        updated[index] = updated[index].copy(word = replacement)
+        return copy(word = updated.joinToString("") { it.word }, segments = updated)
+    }
+}
 
 class PinyinDictionary(
     context: Context,
@@ -60,14 +72,31 @@ class PinyinDictionary(
                 arrayOf(input, "$input{")
             )
         }
-        return result.withIndex()
+        return sortByMemory(input, result)
+    }
+
+    fun lookupExact(input: String, limit: Int = 10): List<PinyinCandidate> {
+        if (input.isEmpty()) return emptyList()
+        val result = mutableListOf<PinyinCandidate>()
+        database.rawQuery(
+            "SELECT word, pinyin FROM entries WHERE pinyin = ? ORDER BY rank DESC, freq DESC LIMIT $limit",
+            arrayOf(input)
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                result.add(PinyinCandidate(cursor.getString(0), cursor.getString(1)))
+            }
+        }
+        return sortByMemory(input, result)
+    }
+
+    fun recordSelection(input: String, word: String) = memory.record(input, word)
+
+    private fun sortByMemory(input: String, result: List<PinyinCandidate>): List<PinyinCandidate> =
+        result.withIndex()
             .sortedWith(compareByDescending<IndexedValue<PinyinCandidate>> {
                 memory.count(input, it.value.word)
             }.thenBy { it.index })
             .map { it.value }
-    }
-
-    fun recordSelection(input: String, word: String) = memory.record(input, word)
 
     private fun sentenceCandidates(input: String, limit: Int): List<PinyinCandidate> {
         val keys = linkedSetOf<String>()
