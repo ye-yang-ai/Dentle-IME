@@ -11,6 +11,8 @@ import sys
 
 from pypinyin import Style, pinyin
 
+from build_initials_index import add_initials_index
+
 
 OUTPUT = Path(__file__).resolve().parents[1] / "app/src/main/assets/pinyin.db"
 SPECIALIZED = Path(__file__).resolve().parents[1] / "lexicon/dental_terms.txt"
@@ -111,7 +113,10 @@ def main() -> None:
                 if key.isascii() and key.isalpha():
                     phrase_rows.append((key, word, frequency, 2, frequency))
         connection.executemany(
-            "INSERT OR IGNORE INTO entries VALUES (?, ?, ?, ?, ?)", phrase_rows
+            "INSERT INTO entries VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(pinyin, word) DO UPDATE SET domain = 2, "
+            "rank = max(entries.rank, excluded.rank)",
+            phrase_rows,
         )
         for word in specialized:
             for key in readings(word):
@@ -120,7 +125,8 @@ def main() -> None:
                 boost = 200 if len(word) == 2 else 10_000
                 connection.execute(
                     "INSERT INTO entries VALUES (?, ?, 1, 1, ?) "
-                    "ON CONFLICT(pinyin, word) DO UPDATE SET domain = 1, rank = max(freq, ?)",
+                    "ON CONFLICT(pinyin, word) DO UPDATE SET domain = 1, "
+                    "rank = max(entries.rank, ?)",
                     (key, word, boost, boost),
                 )
         connection.execute("DROP INDEX entries_key")
@@ -131,6 +137,7 @@ def main() -> None:
         )
         connection.executemany("INSERT INTO transitions VALUES (?, ?, ?, ?)", transitions)
         connection.execute("CREATE INDEX transitions_pinyin ON transitions (pinyin)")
+        add_initials_index(connection)
         connection.commit()
         connection.execute("VACUUM")
         print(

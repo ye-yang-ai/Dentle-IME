@@ -158,4 +158,35 @@ class PinyinDictionaryTest {
             memory.clear()
         }
     }
+
+    @Test
+    fun initialsOfferMultipleSentenceChoicesAndRememberSelection() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val memory = CandidateMemory(context, "initials_test")
+        memory.clear()
+        try {
+            PinyinDictionary(context, memory).use { dictionary ->
+                val choices = dictionary.lookup("whxn")
+                val words = choices.map { it.word }
+                assertTrue(words.toString(), "我好想你" in words)
+                assertTrue(words.toString(), "我很想你" in words)
+                assertTrue(words.toString(), "我会想你" in words)
+                assertTrue(dictionary.lookup("wxy").any { it.word == "我想要" })
+                val otherSentence = dictionary.lookup("wxn").map { it.word }
+                assertTrue(otherSentence.toString(), "我想你" in otherSentence)
+                assertTrue(dictionary.lookup("gjzy").any { it.word == "根尖周炎" })
+                assertTrue(dictionary.lookup("ytys").any { it.word == "牙体牙髓" })
+                assertTrue(choices.filter { it.segments.isNotEmpty() }.all { candidate ->
+                    candidate.segments.first().start == 0 &&
+                        candidate.segments.last().end == 4 &&
+                        candidate.segments.joinToString("") { it.word } == candidate.word
+                })
+                dictionary.recordSelection("whxn", "我很想你")
+                assertEquals("我很想你", dictionary.lookup("whxn").first().word)
+                assertEquals("我好想你", dictionary.lookup("wohaoxiangni").first().word)
+            }
+        } finally {
+            memory.clear()
+        }
+    }
 }
