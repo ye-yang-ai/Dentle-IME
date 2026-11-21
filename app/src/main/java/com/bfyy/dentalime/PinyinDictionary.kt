@@ -48,6 +48,11 @@ class PinyinDictionary(
             "SELECT word, pinyin FROM entries WHERE pinyin = ? ORDER BY rank DESC, freq DESC LIMIT $limit",
             arrayOf(input)
         )
+        if (input.length in 6..SentenceComposer.MAX_INPUT_PINYIN && result.size < limit) {
+            for (candidate in sentenceCandidates(input, limit - result.size)) {
+                if (seen.add(candidate.word)) result.add(candidate)
+            }
+        }
         if (result.size < limit) {
             collect(
                 "SELECT word, pinyin FROM entries WHERE pinyin > ? AND pinyin < ? " +
@@ -63,6 +68,43 @@ class PinyinDictionary(
     }
 
     fun recordSelection(input: String, word: String) = memory.record(input, word)
+
+    private fun sentenceCandidates(input: String, limit: Int): List<PinyinCandidate> {
+        val keys = linkedSetOf<String>()
+        for (start in input.indices) {
+            for (end in start + 1..minOf(input.length, start + SentenceComposer.MAX_WORD_PINYIN)) {
+                keys.add(input.substring(start, end))
+            }
+        }
+
+        val options = mutableMapOf<String, MutableList<WordOption>>()
+        val transitions = mutableMapOf<Pair<String, String>, Int>()
+        for (batch in keys.chunked(400)) {
+            val placeholders = List(batch.size) { "?" }.joinToString(",")
+            database.rawQuery(
+                "SELECT pinyin, word, rank FROM entries WHERE pinyin IN ($placeholders) " +
+                    "ORDER BY pinyin, rank DESC, freq DESC",
+                batch.toTypedArray()
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    val choices = options.getOrPut(cursor.getString(0)) { mutableListOf() }
+                    if (choices.size < 4) {
+                        choices.add(WordOption(cursor.getString(1), cursor.getInt(2)))
+                    }
+                }
+            }
+            database.rawQuery(
+                "SELECT left_word, right_word, score FROM transitions " +
+                    "WHERE pinyin IN ($placeholders)",
+                batch.toTypedArray()
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    transitions[cursor.getString(0) to cursor.getString(1)] = cursor.getInt(2)
+                }
+            }
+        }
+        return SentenceComposer.compose(input, options, transitions, limit)
+    }
 
     override fun close() = database.close()
 }

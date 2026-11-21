@@ -17,7 +17,9 @@ import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 import java.util.ArrayDeque
-import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 class DentalImeService : InputMethodService() {
     private var chinese = true
@@ -33,13 +35,17 @@ class DentalImeService : InputMethodService() {
     private var dictionary: PinyinDictionary? = null
     private var dictionaryFailed = false
     private var destroyed = false
+    private var lookupPending = false
+    private var candidateGeneration = 0
     private val pendingKeys = ArrayDeque<String>()
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val dictionaryLoader = Executors.newSingleThreadExecutor()
+    private val dictionaryWorker = ThreadPoolExecutor(
+        1, 1, 0L, TimeUnit.MILLISECONDS, LinkedBlockingQueue()
+    )
 
     override fun onCreate() {
         super.onCreate()
-        dictionaryLoader.execute {
+        dictionaryWorker.execute {
             val result = runCatching { PinyinDictionary(applicationContext) }
             result.exceptionOrNull()?.let { Log.e("DentalImeService", "Could not load pinyin dictionary", it) }
             mainHandler.post {
@@ -51,9 +57,6 @@ class DentalImeService : InputMethodService() {
                 dictionary = loaded
                 dictionaryFailed = loaded == null
                 updateCandidates()
-                val queued = pendingKeys.toList()
-                pendingKeys.clear()
-                queued.forEach(::press)
             }
         }
     }
@@ -92,6 +95,9 @@ class DentalImeService : InputMethodService() {
         composition.clear()
         candidates = emptyList()
         pendingKeys.clear()
+        lookupPending = false
+        candidateGeneration++
+        if (dictionary != null) dictionaryWorker.queue.clear()
     }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
@@ -107,13 +113,18 @@ class DentalImeService : InputMethodService() {
         composition.clear()
         candidates = emptyList()
         pendingKeys.clear()
+        lookupPending = false
+        candidateGeneration++
+        if (dictionary != null) dictionaryWorker.queue.clear()
         updateCandidateViews()
     }
 
     override fun onDestroy() {
         destroyed = true
-        dictionaryLoader.shutdownNow()
-        dictionary?.close()
+        candidateGeneration++
+        dictionaryWorker.queue.clear()
+        dictionary?.let { loaded -> dictionaryWorker.execute { loaded.close() } }
+        dictionaryWorker.shutdown()
         super.onDestroy()
     }
 
@@ -203,9 +214,36 @@ class DentalImeService : InputMethodService() {
     }
 
     private fun updateCandidates() {
-        candidates = if (composition.isEmpty()) emptyList()
-            else dictionary?.lookup(composition.toString()) ?: emptyList()
+        val input = composition.toString()
+        val generation = ++candidateGeneration
+        val loaded = dictionary
+        candidates = emptyList()
         updateCandidateViews()
+        if (input.isEmpty() || loaded == null) {
+            lookupPending = input.isNotEmpty() && loaded == null && !dictionaryFailed
+            if (!lookupPending) drainPendingKeys()
+            return
+        }
+
+        lookupPending = true
+        dictionaryWorker.queue.clear()
+        dictionaryWorker.execute {
+            val result = runCatching { loaded.lookup(input) }
+            result.exceptionOrNull()?.let { Log.e("DentalImeService", "Candidate lookup failed", it) }
+            mainHandler.post {
+                if (destroyed || generation != candidateGeneration) return@post
+                lookupPending = false
+                candidates = result.getOrDefault(emptyList())
+                updateCandidateViews()
+                drainPendingKeys()
+            }
+        }
+    }
+
+    private fun drainPendingKeys() {
+        val queued = pendingKeys.toList()
+        pendingKeys.clear()
+        queued.forEach(::press)
     }
 
     private fun commitComposition(
@@ -267,8 +305,8 @@ class DentalImeService : InputMethodService() {
     private fun press(label: String) {
         val composingLetter = chinese && !symbols && !shifted &&
             label.length == 1 && label[0] in 'a'..'z'
-        if (pendingKeys.isNotEmpty() || (composition.isNotEmpty() && dictionary == null &&
-                !dictionaryFailed && label != "⌫" && label != "🌐" && !composingLetter)) {
+        if (pendingKeys.isNotEmpty() || (composition.isNotEmpty() && lookupPending &&
+                label != "⌫" && label != "🌐" && !composingLetter)) {
             pendingKeys.addLast(label)
             return
         }
