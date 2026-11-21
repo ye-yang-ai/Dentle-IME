@@ -41,7 +41,7 @@ class PinyinDictionary(context: Context) {
         }
 
         collect(
-            "SELECT word, pinyin FROM entries WHERE pinyin = ? ORDER BY freq DESC LIMIT $limit",
+            "SELECT word, pinyin FROM entries WHERE pinyin = ? ORDER BY rank DESC, freq DESC LIMIT $limit",
             arrayOf(input)
         )
         if (result.size < limit) {
