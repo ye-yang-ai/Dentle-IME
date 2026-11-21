@@ -5,7 +5,10 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.inputmethodservice.InputMethodService
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -13,23 +16,60 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
+import java.util.ArrayDeque
+import java.util.concurrent.Executors
 
 class DentalImeService : InputMethodService() {
     private var chinese = true
     private var symbols = false
     private var shifted = false
-    private var keyboard: LinearLayout? = null
+    private var keyRows: LinearLayout? = null
+    private var renderedMode = -1
+    private var compositionLabel: TextView? = null
+    private var candidateStrip: HorizontalScrollView? = null
+    private val candidateLabels = mutableListOf<TextView>()
     private val composition = StringBuilder()
     private var candidates = emptyList<PinyinCandidate>()
     private var dictionary: PinyinDictionary? = null
+    private var dictionaryFailed = false
+    private var destroyed = false
+    private val pendingKeys = ArrayDeque<String>()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val dictionaryLoader = Executors.newSingleThreadExecutor()
+
+    override fun onCreate() {
+        super.onCreate()
+        dictionaryLoader.execute {
+            val result = runCatching { PinyinDictionary(applicationContext) }
+            result.exceptionOrNull()?.let { Log.e("DentalImeService", "Could not load pinyin dictionary", it) }
+            mainHandler.post {
+                val loaded = result.getOrNull()
+                if (destroyed) {
+                    loaded?.close()
+                    return@post
+                }
+                dictionary = loaded
+                dictionaryFailed = loaded == null
+                updateCandidates()
+                val queued = pendingKeys.toList()
+                pendingKeys.clear()
+                queued.forEach(::press)
+            }
+        }
+    }
 
     override fun onCreateInputView(): View {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(3), dp(8), dp(3), dp(8))
             setBackgroundColor(Color.rgb(226, 231, 231))
-            keyboard = this
+            addCandidateArea()
+            keyRows = LinearLayout(this@DentalImeService).apply {
+                orientation = LinearLayout.VERTICAL
+            }.also { addView(it) }
+            renderedMode = -1
             renderKeys()
+            updateCandidateViews()
         }
     }
 
@@ -51,11 +91,13 @@ class DentalImeService : InputMethodService() {
         shifted = false
         composition.clear()
         candidates = emptyList()
+        pendingKeys.clear()
     }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
-        keyboard?.renderKeys()
+        renderKeys()
+        updateCandidateViews()
     }
 
     override fun onEvaluateFullscreenMode(): Boolean = false
@@ -64,16 +106,23 @@ class DentalImeService : InputMethodService() {
         super.onFinishInput()
         composition.clear()
         candidates = emptyList()
+        pendingKeys.clear()
+        updateCandidateViews()
     }
 
     override fun onDestroy() {
+        destroyed = true
+        dictionaryLoader.shutdownNow()
         dictionary?.close()
         super.onDestroy()
     }
 
-    private fun LinearLayout.renderKeys() {
-        removeAllViews()
-        addCandidateArea()
+    private fun renderKeys() {
+        val rowsContainer = keyRows ?: return
+        val mode = (if (chinese) 1 else 0) or (if (symbols) 2 else 0) or
+            (if (shifted) 4 else 0)
+        if (renderedMode == mode && rowsContainer.childCount > 0) return
+        rowsContainer.removeAllViews()
         val rows = if (symbols) {
             listOf(
                 listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
@@ -87,58 +136,76 @@ class DentalImeService : InputMethodService() {
                 listOf("⇧") + "zxcvbnm".map(Char::toString) + "⌫"
             )
         }
-        rows.forEach { addKeyRow(it) }
-        addKeyRow(listOf(if (chinese) "中" else "EN", if (symbols) "ABC" else "?123", "🌐", ",", "space", ".", "↵"))
+        rows.forEach { rowsContainer.addKeyRow(it) }
+        rowsContainer.addKeyRow(listOf(if (chinese) "中" else "EN", if (symbols) "ABC" else "?123", "🌐", ",", "space", ".", "↵"))
+        renderedMode = mode
     }
 
     private fun LinearLayout.addCandidateArea() {
-        addView(TextView(this@DentalImeService).apply {
-            text = if (composition.isEmpty()) "" else composition.toString()
+        compositionLabel = TextView(this@DentalImeService).apply {
             textSize = 14f
             setTextColor(Color.rgb(42, 85, 92))
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(9), 0, 0, 0)
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(26)))
+        }.also {
+            addView(it, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(26)))
+        }
 
         val strip = HorizontalScrollView(this@DentalImeService).apply {
             isHorizontalScrollBarEnabled = false
             isFillViewport = true
         }
+        candidateStrip = strip
         val row = LinearLayout(this@DentalImeService).apply { orientation = LinearLayout.HORIZONTAL }
-        candidates.forEach { candidate ->
-            row.addView(candidateLabel(candidate.word, candidate.pinyin) {
-                commitComposition(candidate.word)
-            })
-        }
-        if (composition.isNotEmpty()) {
-            row.addView(candidateLabel(composition.toString(), "原样输入") {
-                commitComposition(composition.toString())
-            })
+        candidateLabels.clear()
+        repeat(11) {
+            candidateLabels.add(candidateLabel().also { row.addView(it) })
         }
         strip.addView(row)
         addView(strip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)))
     }
 
-    private fun candidateLabel(value: String, description: String, onClick: () -> Unit): View =
+    private fun candidateLabel(): TextView =
         TextView(this).apply {
-            text = value
             textSize = 21f
             gravity = Gravity.CENTER
             setTextColor(Color.rgb(24, 39, 42))
             setPadding(dp(12), 0, dp(12), 0)
-            contentDescription = "$value，$description"
-            setOnClickListener { onClick() }
+            visibility = View.GONE
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, dp(44)
             )
         }
 
-    private fun updateCandidates() {
-        candidates = if (composition.isEmpty()) emptyList() else {
-            val source = dictionary ?: PinyinDictionary(this).also { dictionary = it }
-            source.lookup(composition.toString())
+    private fun updateCandidateViews() {
+        compositionLabel?.text = composition.toString()
+        candidateLabels.forEachIndexed { index, label ->
+            val candidate = candidates.getOrNull(index)
+            val raw = index == candidates.size && composition.isNotEmpty()
+            when {
+                candidate != null -> {
+                    label.text = candidate.word
+                    label.contentDescription = "${candidate.word}，${candidate.pinyin}"
+                    label.setOnClickListener { commitComposition(candidate.word) }
+                    label.visibility = View.VISIBLE
+                }
+                raw -> {
+                    val value = composition.toString()
+                    label.text = value
+                    label.contentDescription = "$value，原样输入"
+                    label.setOnClickListener { commitComposition(value) }
+                    label.visibility = View.VISIBLE
+                }
+                else -> label.visibility = View.GONE
+            }
         }
-        keyboard?.renderKeys()
+        candidateStrip?.takeIf { it.scrollX != 0 }?.scrollTo(0, 0)
+    }
+
+    private fun updateCandidates() {
+        candidates = if (composition.isEmpty()) emptyList()
+            else dictionary?.lookup(composition.toString()) ?: emptyList()
+        updateCandidateViews()
     }
 
     private fun commitComposition(value: String = candidates.firstOrNull()?.word ?: composition.toString()) {
@@ -146,7 +213,7 @@ class DentalImeService : InputMethodService() {
         currentInputConnection?.commitText(value, 1)
         composition.clear()
         candidates = emptyList()
-        keyboard?.renderKeys()
+        updateCandidateViews()
     }
 
     private fun LinearLayout.addKeyRow(labels: List<String>) {
@@ -192,22 +259,29 @@ class DentalImeService : InputMethodService() {
     }
 
     private fun press(label: String) {
+        val composingLetter = chinese && !symbols && !shifted &&
+            label.length == 1 && label[0] in 'a'..'z'
+        if (pendingKeys.isNotEmpty() || (composition.isNotEmpty() && dictionary == null &&
+                !dictionaryFailed && label != "⌫" && label != "🌐" && !composingLetter)) {
+            pendingKeys.addLast(label)
+            return
+        }
         when (label) {
             "中", "EN" -> {
                 commitComposition()
                 chinese = !chinese
                 shifted = false
-                keyboard?.renderKeys()
+                renderKeys()
             }
             "?123", "ABC" -> {
                 commitComposition()
                 symbols = !symbols
-                keyboard?.renderKeys()
+                renderKeys()
             }
             "⇧" -> {
                 commitComposition()
                 shifted = !shifted
-                keyboard?.renderKeys()
+                renderKeys()
             }
             "⌫" -> {
                 if (composition.isNotEmpty()) {
@@ -237,7 +311,7 @@ class DentalImeService : InputMethodService() {
                 else currentInputConnection?.commitText(" ", 1)
             }
             else -> {
-                if (chinese && !symbols && !shifted && label.length == 1 && label[0] in 'a'..'z') {
+                if (composingLetter) {
                     composition.append(label)
                     currentInputConnection?.setComposingText(composition.toString(), 1)
                     updateCandidates()
@@ -250,7 +324,7 @@ class DentalImeService : InputMethodService() {
                 currentInputConnection?.commitText(value, 1)
                 if (shifted) {
                     shifted = false
-                    keyboard?.renderKeys()
+                    renderKeys()
                 }
             }
         }
