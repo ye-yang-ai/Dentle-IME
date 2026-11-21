@@ -36,4 +36,26 @@ class PinyinDictionaryTest {
             dictionary.close()
         }
     }
+
+    @Test
+    fun selectedWordMovesAheadAndCanBeCleared() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val memory = CandidateMemory(context, "candidate_memory_test")
+        memory.clear()
+        try {
+            PinyinDictionary(context, memory).use { dictionary ->
+                assertEquals("征集", dictionary.lookup("zhengji").first().word)
+                dictionary.recordSelection("zhengji", "正畸")
+                assertEquals("正畸", dictionary.lookup("zhengji").first().word)
+                assertEquals("你好", dictionary.lookup("nihao").first().word)
+            }
+            PinyinDictionary(context, CandidateMemory(context, "candidate_memory_test")).use { dictionary ->
+                assertEquals("正畸", dictionary.lookup("zhengji").first().word)
+                memory.clear()
+                assertEquals("征集", dictionary.lookup("zhengji").first().word)
+            }
+        } finally {
+            memory.clear()
+        }
+    }
 }

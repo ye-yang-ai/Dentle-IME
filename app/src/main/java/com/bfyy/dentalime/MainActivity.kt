@@ -13,9 +13,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,7 +41,8 @@ class MainActivity : ComponentActivity() {
                     onSelect = {
                         (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
                             .showInputMethodPicker()
-                    }
+                    },
+                    onClearMemory = { CandidateMemory(this).clear() }
                 )
             }
         }
@@ -75,9 +78,30 @@ private enum class KeyboardState { DISABLED, ENABLED, SELECTED }
 private fun SetupScreen(
     keyboardState: KeyboardState,
     onEnable: () -> Unit,
-    onSelect: () -> Unit
+    onSelect: () -> Unit,
+    onClearMemory: () -> Unit
 ) {
     var testText by remember { mutableStateOf("") }
+    var confirmClear by remember { mutableStateOf(false) }
+
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text(stringResource(R.string.clear_memory_title)) },
+            text = { Text(stringResource(R.string.clear_memory_message)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    onClearMemory()
+                    confirmClear = false
+                }) { Text(stringResource(R.string.clear_memory_confirm)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClear = false }) {
+                    Text(stringResource(R.string.clear_memory_cancel))
+                }
+            }
+        )
+    }
 
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
@@ -108,5 +132,8 @@ private fun SetupScreen(
             label = { Text(stringResource(R.string.test_hint)) },
             modifier = Modifier.fillMaxWidth()
         )
+        TextButton(onClick = { confirmClear = true }) {
+            Text(stringResource(R.string.clear_memory))
+        }
     }
 }

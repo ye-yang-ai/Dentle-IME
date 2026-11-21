@@ -186,7 +186,7 @@ class DentalImeService : InputMethodService() {
                 candidate != null -> {
                     label.text = candidate.word
                     label.contentDescription = "${candidate.word}，${candidate.pinyin}"
-                    label.setOnClickListener { commitComposition(candidate.word) }
+                    label.setOnClickListener { commitComposition(candidate.word, rememberSelection = true) }
                     label.visibility = View.VISIBLE
                 }
                 raw -> {
@@ -208,8 +208,14 @@ class DentalImeService : InputMethodService() {
         updateCandidateViews()
     }
 
-    private fun commitComposition(value: String = candidates.firstOrNull()?.word ?: composition.toString()) {
+    private fun commitComposition(
+        value: String = candidates.firstOrNull()?.word ?: composition.toString(),
+        rememberSelection: Boolean = false
+    ) {
         if (composition.isEmpty()) return
+        if (rememberSelection && candidates.any { it.word == value }) {
+            dictionary?.recordSelection(composition.toString(), value)
+        }
         currentInputConnection?.commitText(value, 1)
         composition.clear()
         candidates = emptyList()
@@ -307,7 +313,7 @@ class DentalImeService : InputMethodService() {
                 else currentInputConnection?.commitText("\n", 1)
             }
             "space" -> {
-                if (composition.isNotEmpty()) commitComposition()
+                if (composition.isNotEmpty()) commitComposition(rememberSelection = true)
                 else currentInputConnection?.commitText(" ", 1)
             }
             else -> {

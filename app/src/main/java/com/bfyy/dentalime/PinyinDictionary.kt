@@ -2,11 +2,15 @@ package com.bfyy.dentalime
 
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
+import java.io.Closeable
 import java.io.File
 
 data class PinyinCandidate(val word: String, val pinyin: String)
 
-class PinyinDictionary(context: Context) {
+class PinyinDictionary(
+    context: Context,
+    private val memory: CandidateMemory = CandidateMemory(context)
+) : Closeable {
     private val database: SQLiteDatabase
 
     init {
@@ -51,8 +55,14 @@ class PinyinDictionary(context: Context) {
                 arrayOf(input, "$input{")
             )
         }
-        return result
+        return result.withIndex()
+            .sortedWith(compareByDescending<IndexedValue<PinyinCandidate>> {
+                memory.count(input, it.value.word)
+            }.thenBy { it.index })
+            .map { it.value }
     }
 
-    fun close() = database.close()
+    fun recordSelection(input: String, word: String) = memory.record(input, word)
+
+    override fun close() = database.close()
 }
