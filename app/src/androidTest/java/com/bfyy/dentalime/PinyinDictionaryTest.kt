@@ -38,6 +38,56 @@ class PinyinDictionaryTest {
     }
 
     @Test
+    fun t9ComposesFullInitialsAndMixedSentences() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val memory = CandidateMemory(context, "t9_sentence_test")
+        memory.clear()
+        try {
+            PinyinDictionary(context, memory).use { dictionary ->
+                val cases = listOf(
+                    "wohaoxiangni" to "我好想你",
+                    "woxihn" to "我喜欢你",
+                    "woyaobaya" to "我要拔牙",
+                    "whxn" to "我好想你"
+                )
+                cases.forEach { (spelling, expected) ->
+                    val code = T9.encode(spelling)
+                    val choices = dictionary.lookupT9(code,
+                        if (spelling == "whxn" || spelling == "woxihn") spelling else null
+                    ).candidates
+                    val sentence = choices.firstOrNull { it.word == expected }
+                    assertTrue("$spelling: ${choices.map { it.word }}", sentence != null)
+                    if (spelling == "wohaoxiangni" || spelling == "woyaobaya") {
+                        assertTrue("$spelling: ${choices.map { it.word }}",
+                            choices.indexOfFirst { it.word == expected } < 10)
+                    }
+                    assertTrue("$spelling has no segments", sentence!!.segments.size > 1)
+                    assertEquals(code.length, sentence.segments.last().end)
+                    assertEquals(sentence.word, sentence.segments.joinToString("") { it.word })
+                    sentence.segments.forEach { segment ->
+                        assertEquals(code.substring(segment.start, segment.end),
+                            T9.encode(segment.spelling))
+                    }
+                }
+                val unresolved = dictionary.lookupT9(T9.encode("whxn")).candidates
+                val draft = unresolved.firstOrNull { it.word == "我好想你" }
+                assertTrue(unresolved.map { it.word }.toString(), draft != null)
+                val first = draft!!.segments.first()
+                val replacement = dictionary.lookupT9(
+                    T9.encode(first.spelling), first.spelling
+                ).candidates.first { it.word != first.word }
+                val edited = draft.replaceSegment(0, replacement)
+                assertEquals(replacement.word + draft.word.removePrefix(first.word), edited.word)
+                assertEquals(T9.encode("whxn"), T9.encode(edited.pinyin))
+                assertEquals(draft.segments.map { it.start to it.end },
+                    edited.segments.map { it.start to it.end })
+            }
+        } finally {
+            memory.clear()
+        }
+    }
+
+    @Test
     fun dentalTermsAreFirstForFullPinyin() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val dictionary = PinyinDictionary(context)

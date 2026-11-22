@@ -6,7 +6,9 @@ import java.io.Closeable
 import java.io.File
 import kotlin.math.ln
 
-data class PinyinSegment(val start: Int, val end: Int, val word: String)
+data class PinyinSegment(
+    val start: Int, val end: Int, val word: String, val spelling: String = ""
+)
 
 data class PinyinCandidate(
     val word: String,
@@ -18,6 +20,16 @@ data class PinyinCandidate(
         val updated = segments.toMutableList()
         updated[index] = updated[index].copy(word = replacement)
         return copy(word = updated.joinToString("") { it.word }, segments = updated)
+    }
+
+    fun replaceSegment(index: Int, replacement: PinyinCandidate): PinyinCandidate {
+        val updated = segments.toMutableList()
+        updated[index] = updated[index].copy(word = replacement.word, spelling = replacement.pinyin)
+        return copy(
+            word = updated.joinToString("") { it.word },
+            pinyin = updated.joinToString("") { it.spelling },
+            segments = updated
+        )
     }
 }
 
@@ -33,10 +45,13 @@ class PinyinDictionary(
         const val MAX_INITIALS_WORD = 12
         const val INITIALS_OPTIONS_PER_KEY = 24
         const val MAX_MIXED_INPUT = 40
+        const val MAX_T9_INPUT = 32
+        const val MAX_T9_WORD_CODE = 18
     }
 
     private val database: SQLiteDatabase
     private val mixedMatcher: MixedPinyinMatcher by lazy { MixedPinyinMatcher(database) }
+    private val t9OptionsCache = mutableMapOf<String, List<WordOption>>()
 
     init {
         val file = File(context.noBackupFilesDir, "pinyin.db")
@@ -109,7 +124,15 @@ class PinyinDictionary(
     }
 
     fun lookupT9(code: String, selectedSpelling: String? = null, limit: Int = 40): T9Lookup {
-        if (code.isEmpty() || code.any { it !in '2'..'9' }) return T9Lookup(emptyList(), emptyList())
+        if (code.isEmpty() || code.length > MAX_T9_INPUT || code.any { it !in '2'..'9' })
+            return T9Lookup(emptyList(), emptyList())
+        if (selectedSpelling != null && T9.encode(selectedSpelling) == code) {
+            val resolved = (lookup(selectedSpelling, limit) + lookupAllExact(selectedSpelling))
+                .filter { it.pinyin == selectedSpelling }
+                .distinctBy { it.word }
+                .take(limit)
+            return T9Lookup(resolved, listOf(selectedSpelling))
+        }
         val exact = mutableListOf<PinyinCandidate>()
         database.rawQuery(
             "SELECT word, pinyin FROM entries WHERE t9_code = ? " +
@@ -118,8 +141,23 @@ class PinyinDictionary(
         ).use { cursor ->
             while (cursor.moveToNext()) exact.add(PinyinCandidate(cursor.getString(0), cursor.getString(1)))
         }
+        val initials = mutableListOf<PinyinCandidate>()
+        database.rawQuery(
+                "SELECT word, initials FROM entries WHERE t9_initials = ? AND initials != '' " +
+                    "ORDER BY rank DESC, freq DESC LIMIT ${limit * 2}",
+                arrayOf(code)
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    initials.add(PinyinCandidate(cursor.getString(0), cursor.getString(1)))
+                }
+            }
+        val transitions = t9TransitionCandidates(code, limit)
+        val composed = if (code.length in 3..MAX_T9_INPUT) t9SentenceCandidates(code, limit)
+            else emptyList()
         val prefix = mutableListOf<PinyinCandidate>()
-        if (exact.size < limit && code.length <= 12) {
+        if (code.length == 1 ||
+            (exact.size + initials.size + transitions.size + composed.size < limit &&
+                code.length <= 12)) {
             database.rawQuery(
                 "SELECT word, pinyin FROM entries WHERE t9_code > ? AND t9_code < ? " +
                     "ORDER BY length(t9_code), rank DESC, freq DESC LIMIT ${limit * 3}",
@@ -128,13 +166,12 @@ class PinyinDictionary(
                 while (cursor.moveToNext()) prefix.add(PinyinCandidate(cursor.getString(0), cursor.getString(1)))
             }
         }
-        val all = (if (code.length == 1) prefix + exact else exact + prefix)
+        val all = (if (code.length == 1) prefix + initials + exact
+            else exact + initials + transitions + composed + prefix)
             .distinctBy { it.word to it.pinyin }
         val spellings = all.map { it.pinyin }.distinct().take(24)
-        val candidates = if (selectedSpelling == null) all else {
-            if (T9.encode(selectedSpelling) == code) lookupAllExact(selectedSpelling)
+        val candidates = if (selectedSpelling == null) all
             else all.filter { it.pinyin == selectedSpelling }
-        }
         return T9Lookup(
             candidates.sortedWith(compareByDescending<PinyinCandidate> {
                 memory.count(it.pinyin, it.word)
@@ -142,6 +179,81 @@ class PinyinDictionary(
             spellings
         )
     }
+
+    private fun t9TransitionCandidates(code: String, limit: Int): List<PinyinCandidate> {
+        if (code.length < 3) return emptyList()
+        val result = mutableListOf<PinyinCandidate>()
+        database.rawQuery(
+            "SELECT left_word, right_word, initials FROM transitions " +
+                "WHERE t9_initials = ? ORDER BY score DESC LIMIT $limit",
+            arrayOf(code)
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val left = cursor.getString(0)
+                val right = cursor.getString(1)
+                val spelling = cursor.getString(2)
+                val split = left.codePointCount(0, left.length)
+                if (split >= spelling.length) continue
+                result.add(PinyinCandidate(left + right, spelling, listOf(
+                    PinyinSegment(0, split, left, spelling.substring(0, split)),
+                    PinyinSegment(split, code.length, right, spelling.substring(split))
+                )))
+            }
+        }
+        return result
+    }
+
+    private fun t9SentenceCandidates(code: String, limit: Int): List<PinyinCandidate> {
+        if (t9OptionsCache.size > 4096) t9OptionsCache.clear()
+        val keys = linkedSetOf<String>()
+        for (start in code.indices) {
+            for (end in start + 1..minOf(code.length, start + MAX_T9_WORD_CODE)) {
+                keys.add(code.substring(start, end))
+            }
+        }
+        val options = keys.associateWith { key -> t9WordOptions(key) }
+            .filterValues { it.isNotEmpty() }
+        val fullOptions = options.mapValues { (_, words) ->
+            words.filter { it.spellingMask == 1 }
+        }.filterValues { it.isNotEmpty() }
+        val full = SentenceComposer.compose(
+            code, fullOptions, emptyMap(), maxOf(limit * 3, 96), t9 = true
+        )
+        val mixed = SentenceComposer.compose(
+            code, options, emptyMap(), maxOf(limit * 3, 96), t9 = true
+        )
+        return (rankComposed(full, limit, diverse = false) +
+            rankComposed(mixed, limit, mixed = true))
+            .distinctBy { it.word }
+            .take(limit)
+    }
+
+    private fun t9WordOptions(code: String): List<WordOption> =
+        t9OptionsCache.getOrPut(code) {
+            val result = mutableListOf<WordOption>()
+            database.rawQuery(
+                "SELECT word, pinyin, rank, domain FROM entries WHERE t9_code = ? " +
+                    "ORDER BY rank DESC, freq DESC LIMIT 8",
+                arrayOf(code)
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    result.add(WordOption(cursor.getString(0), cursor.getInt(2),
+                        cursor.getInt(3), 1, cursor.getString(1)))
+                }
+            }
+            database.rawQuery(
+                "SELECT word, initials, rank, domain FROM entries " +
+                    "WHERE t9_initials = ? AND initials != '' " +
+                    "ORDER BY rank DESC, freq DESC LIMIT 24",
+                arrayOf(code)
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    result.add(WordOption(cursor.getString(0), cursor.getInt(2),
+                        cursor.getInt(3), 2, cursor.getString(1)))
+                }
+            }
+            result.distinctBy { it.word to it.spelling }
+        }
 
     fun lookupExact(input: String, limit: Int = 10): List<PinyinCandidate> {
         if (input.isEmpty()) return emptyList()
@@ -344,7 +456,8 @@ class PinyinDictionary(
     }
 
     private fun rankComposed(
-        composed: List<PinyinCandidate>, limit: Int, mixed: Boolean = false
+        composed: List<PinyinCandidate>, limit: Int, mixed: Boolean = false,
+        diverse: Boolean = true
     ): List<PinyinCandidate> {
         val pairs = composed.flatMap { candidate ->
             candidate.segments.zipWithNext { left, right ->
@@ -384,7 +497,7 @@ class PinyinDictionary(
                     (if (mixed) 4.0 * ln(pairFrequencies.getOrDefault(pair, 0) + 1.0) else 0.0)
             }.sum()
         }
-        if (mixed) return ranked.take(limit)
+        if (mixed || !diverse) return ranked.take(limit)
         val varied = ranked.distinctBy { it.word.take(2) }.take(limit)
         if (varied.size == limit) return varied
         return varied + ranked.filter { candidate -> varied.none { it.word == candidate.word } }

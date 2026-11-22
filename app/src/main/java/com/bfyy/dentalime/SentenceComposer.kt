@@ -3,7 +3,8 @@ package com.bfyy.dentalime
 import kotlin.math.ln
 
 internal data class WordOption(
-    val word: String, val rank: Int, val domain: Int = 0, val spellingMask: Int = 0
+    val word: String, val rank: Int, val domain: Int = 0, val spellingMask: Int = 0,
+    val spelling: String = ""
 )
 
 internal object SentenceComposer {
@@ -18,7 +19,8 @@ internal object SentenceComposer {
         val words: Int,
         val lastWord: String,
         val tail: SegmentNode?,
-        val spellingMask: Int
+        val spellingMask: Int,
+        val spelling: String
     )
 
     private data class SegmentNode(val segment: PinyinSegment, val previous: SegmentNode?)
@@ -29,12 +31,13 @@ internal object SentenceComposer {
         transitions: Map<Pair<String, String>, Int>,
         limit: Int,
         initials: Boolean = false,
-        mixed: Boolean = false
+        mixed: Boolean = false,
+        t9: Boolean = false
     ): List<PinyinCandidate> {
-        val diverse = initials || mixed
-        val beamWidth = if (mixed) 64 else if (diverse) 96 else BEAM_WIDTH
+        val diverse = initials || mixed || t9
+        val beamWidth = if (mixed || t9) 64 else if (diverse) 96 else BEAM_WIDTH
         val paths = Array(input.length + 1) { mutableListOf<Path>() }
-        paths[0].add(Path("", 0.0, 0, "", null, 0))
+        paths[0].add(Path("", 0.0, 0, "", null, 0, ""))
 
         for (start in input.indices) {
             if (paths[start].isEmpty()) continue
@@ -49,6 +52,7 @@ internal object SentenceComposer {
                         val phraseBonus = if (mixed && word.domain == 1) 8.0
                             else if (diverse && word.domain == 2) 2.5 else 0.0
                         val singleCharacterPenalty = if (diverse && word.word.length == 1) 2.5 else 0.0
+                        val spelling = word.spelling.ifEmpty { input.substring(start, end) }
                         destination.add(
                             Path(
                                 path.text + word.word,
@@ -56,8 +60,9 @@ internal object SentenceComposer {
                                     contextBonus + phraseBonus - singleCharacterPenalty,
                                 path.words + 1,
                                 word.word,
-                                SegmentNode(PinyinSegment(start, end, word.word), path.tail),
-                                path.spellingMask or word.spellingMask
+                                SegmentNode(PinyinSegment(start, end, word.word, spelling), path.tail),
+                                path.spellingMask or word.spellingMask,
+                                if (t9) path.spelling + spelling else ""
                             )
                         )
                     }
@@ -72,7 +77,7 @@ internal object SentenceComposer {
 
         return paths[input.length]
             .asSequence()
-            .filter { if (mixed) it.words > 0 && it.spellingMask == 3 else it.words > 1 }
+            .filter { if (mixed && !t9) it.words > 0 && it.spellingMask == 3 else it.words > 1 }
             .sortedByDescending { it.score }
             .distinctBy { it.text }
             .take(limit)
@@ -83,7 +88,8 @@ internal object SentenceComposer {
                     segments.add(node.segment)
                     node = node.previous
                 }
-                PinyinCandidate(path.text, input, segments.asReversed(), path.score)
+                PinyinCandidate(path.text, if (t9) path.spelling else input,
+                    segments.asReversed(), path.score)
             }
             .toList()
     }

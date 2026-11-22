@@ -1,5 +1,6 @@
 package com.bfyy.dentalime
 
+import android.app.AlertDialog
 import android.content.Context
 import android.graphics.Color
 import android.graphics.Typeface
@@ -12,6 +13,7 @@ import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.HorizontalScrollView
@@ -315,7 +317,8 @@ class DentalImeService : InputMethodService() {
             contentDescription = "返回整句候选"
             setOnClickListener {
                 editingSegment = null
-                updateCandidates()
+                t9Spelling = null
+                updateActiveCandidates()
             }
         }.also(row::addView)
         candidateRow = row
@@ -354,6 +357,14 @@ class DentalImeService : InputMethodService() {
         spellingRow?.apply {
             removeAllViews()
             if (layout == KeyboardLayout.T9 && t9Input.isNotEmpty()) {
+                addView(TextView(this@DentalImeService).apply {
+                    text = "选拼音"
+                    textSize = 15f
+                    gravity = Gravity.CENTER
+                    setPadding(dp(12), 0, dp(12), 0)
+                    setTextColor(Color.rgb(24, 39, 42))
+                    setOnClickListener { showExactT9SpellingPicker() }
+                }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(32)))
                 t9Spellings.forEach { spelling ->
                     addView(TextView(this@DentalImeService).apply {
                         text = spelling
@@ -365,6 +376,7 @@ class DentalImeService : InputMethodService() {
                             else Color.TRANSPARENT)
                         setOnClickListener {
                             t9Spelling = if (t9Spelling == spelling) null else spelling
+                            if (editingSegment == null) clearSentenceDraft()
                             updateT9Candidates()
                         }
                     }, LinearLayout.LayoutParams(
@@ -390,10 +402,12 @@ class DentalImeService : InputMethodService() {
                         setColor(if (editingSegment == index) Color.rgb(140, 198, 189)
                             else Color.rgb(206, 220, 217))
                     }
-                    contentDescription = "修改${segment.word}，拼音${draft.pinyin.substring(segment.start, segment.end)}"
+                    contentDescription = "修改${segment.word}，拼音${segment.spelling}"
                     setOnClickListener {
                         editingSegment = index
-                        updateCandidates()
+                        t9Spelling = if (this@DentalImeService.layout == KeyboardLayout.T9)
+                            segment.spelling else null
+                        updateActiveCandidates()
                     }
                 }, LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT, dp(32)
@@ -419,7 +433,10 @@ class DentalImeService : InputMethodService() {
                     label.text = candidate.word
                     label.contentDescription = "${candidate.word}，${candidate.pinyin}"
                     label.setOnClickListener {
-                        if (layout == KeyboardLayout.T9 && t9Input.isNotEmpty()) commitT9(candidate)
+                        if (layout == KeyboardLayout.T9 && t9Input.isNotEmpty()) {
+                            if (editingSegment != null) replaceT9DraftSegment(candidate)
+                            else commitT9(candidate)
+                        }
                         else if (editingSegment != null) replaceDraftSegment(candidate.word)
                         else {
                             val consumed = candidateConsumed.getOrNull(index) ?: composition.length
@@ -448,7 +465,8 @@ class DentalImeService : InputMethodService() {
     }
 
     private fun updateT9Candidates() {
-        val code = t9Input.toString()
+        val segment = editingSegment?.let { sentenceDraft?.segments?.getOrNull(it) }
+        val code = segment?.let { t9Input.substring(it.start, it.end) } ?: t9Input.toString()
         val spelling = t9Spelling
         val generation = ++candidateGeneration
         val loaded = dictionary
@@ -469,8 +487,17 @@ class DentalImeService : InputMethodService() {
                 if (destroyed || generation != candidateGeneration) return@post
                 lookupPending = false
                 val found = result.getOrDefault(T9Lookup(emptyList(), emptyList()))
-                candidates = found.candidates
+                val edited = sentenceDraft?.takeIf { draftEdited && segment == null }
+                candidates = if (edited == null) found.candidates.filter {
+                    segment == null || T9.encode(it.pinyin) == code
+                }
+                    else listOf(edited) + found.candidates.filter { it.word != edited.word }
                 t9Spellings = found.spellings
+                if (segment == null && edited == null) {
+                    sentenceDraft = found.candidates.firstOrNull {
+                        it.segments.size > 1 && it.segments.last().end == t9Input.length
+                    }
+                }
                 ensureCandidateLabels(candidates.size)
                 updateCandidateViews()
                 drainPendingKeys()
@@ -485,6 +512,7 @@ class DentalImeService : InputMethodService() {
         t9Spelling = null
         t9Spellings = emptyList()
         candidates = emptyList()
+        clearSentenceDraft()
         lookupPending = false
         candidateGeneration++
         dictionaryWorker.queue.clear()
@@ -494,10 +522,82 @@ class DentalImeService : InputMethodService() {
 
     private fun commitActiveComposition(): Boolean {
         if (layout == KeyboardLayout.T9 && t9Input.isNotEmpty()) {
-            val first = candidates.firstOrNull() ?: return false
-            commitT9(first)
+            if (editingSegment != null) {
+                val first = candidates.firstOrNull() ?: return false
+                replaceT9DraftSegment(first)
+            }
+            val choice = if (draftEdited) sentenceDraft else candidates.firstOrNull()
+            commitT9(choice ?: return false)
         } else commitComposition()
         return true
+    }
+
+    private fun replaceT9DraftSegment(candidate: PinyinCandidate) {
+        val index = editingSegment ?: return
+        val draft = sentenceDraft ?: return
+        sentenceDraft = draft.replaceSegment(index, candidate)
+        draftEdited = true
+        editingSegment = null
+        t9Spelling = null
+        dictionary?.recordSelection(candidate.pinyin, candidate.word)
+        updateT9Candidates()
+    }
+
+    private fun showExactT9SpellingPicker() {
+        val segment = editingSegment?.let { sentenceDraft?.segments?.getOrNull(it) }
+        val code = segment?.let { t9Input.substring(it.start, it.end) } ?: t9Input.toString()
+        if (code.isEmpty()) return
+        val chosen = CharArray(code.length) { index ->
+            t9Spelling?.getOrNull(index)?.takeIf { it in T9.letters(code[index]) } ?: '\u0000'
+        }
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val scroll = HorizontalScrollView(this).apply { addView(row) }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("选择拼音")
+            .setView(scroll)
+            .setNegativeButton("取消", null)
+            .setNeutralButton("清除筛选") { _, _ ->
+                t9Spelling = null
+                if (editingSegment == null) clearSentenceDraft()
+                updateT9Candidates()
+            }
+            .setPositiveButton("确定") { _, _ ->
+                t9Spelling = String(chosen)
+                if (editingSegment == null) clearSentenceDraft()
+                updateT9Candidates()
+            }
+            .create()
+        dialog.window?.apply {
+            setType(WindowManager.LayoutParams.TYPE_APPLICATION_ATTACHED_DIALOG)
+            attributes = attributes.apply { token = layoutButton?.windowToken }
+        }
+        code.forEachIndexed { index, digit ->
+            val key = TextView(this).apply {
+                text = chosen[index].takeIf { it != '\u0000' }?.uppercase() ?: digit.toString()
+                textSize = 19f
+                gravity = Gravity.CENTER
+                contentDescription = "第${index + 1}位，按键$digit"
+                setOnClickListener {
+                    PopupMenu(this@DentalImeService, this).apply {
+                        T9.letters(digit).forEach { letter ->
+                            menu.add(letter.uppercase()).setOnMenuItemClickListener {
+                                chosen[index] = letter
+                                text = letter.uppercase()
+                                dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled =
+                                    chosen.all { it != '\u0000' }
+                                true
+                            }
+                        }
+                        show()
+                    }
+                }
+            }
+            row.addView(key, LinearLayout.LayoutParams(dp(48), dp(56)).apply {
+                setMargins(dp(2), dp(4), dp(2), dp(4))
+            })
+        }
+        dialog.show()
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = chosen.all { it != '\u0000' }
     }
 
     private fun updateCandidates() {
@@ -752,7 +852,10 @@ class DentalImeService : InputMethodService() {
             "⌫" -> {
                 if (t9Input.isNotEmpty()) {
                     if (t9Spelling != null) t9Spelling = null
-                    else t9Input.deleteCharAt(t9Input.lastIndex)
+                    else {
+                        t9Input.deleteCharAt(t9Input.lastIndex)
+                        clearSentenceDraft()
+                    }
                     if (t9Input.isEmpty()) currentInputConnection?.commitText("", 1)
                     else currentInputConnection?.setComposingText(t9Input.toString(), 1)
                     updateT9Candidates()
@@ -795,7 +898,10 @@ class DentalImeService : InputMethodService() {
             }
             "space" -> {
                 if (t9Input.isNotEmpty()) {
-                    candidates.firstOrNull()?.let(::commitT9)
+                    if (editingSegment != null) {
+                        candidates.firstOrNull()?.let(::replaceT9DraftSegment)
+                    } else (if (draftEdited) sentenceDraft else candidates.firstOrNull())
+                        ?.let(::commitT9)
                 } else if (editingSegment != null && candidates.isNotEmpty()) {
                     replaceDraftSegment(candidates.first().word)
                 } else if (composition.isNotEmpty() || selectedPrefixes.isNotEmpty()) {
@@ -807,6 +913,7 @@ class DentalImeService : InputMethodService() {
                 if (composingT9) {
                     if (t9Input.length >= 32) return
                     t9Input.append(label)
+                    clearSentenceDraft()
                     t9Spelling = null
                     t9Spellings = emptyList()
                     currentInputConnection?.setComposingText(t9Input.toString(), 1)
