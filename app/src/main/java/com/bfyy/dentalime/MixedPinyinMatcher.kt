@@ -45,6 +45,23 @@ internal class MixedPinyinMatcher(private val database: SQLiteDatabase) {
         return reachable[input.length]
     }
 
+    fun initialsFor(input: String, syllableCount: Int): String? {
+        val failed = hashSetOf<Pair<Int, Int>>()
+        fun match(start: Int, remaining: Int): String? {
+            if (start == input.length) return if (remaining == 0) "" else null
+            if (remaining == 0 || !failed.add(start to remaining)) return null
+            for (syllable in fullSyllablesByInitial[input[start]].orEmpty()
+                .sortedByDescending { it.length }) {
+                if (input.startsWith(syllable, start)) {
+                    val suffix = match(start + syllable.length, remaining - 1)
+                    if (suffix != null) return syllable[0] + suffix
+                }
+            }
+            return null
+        }
+        return match(0, syllableCount)
+    }
+
     fun options(input: String): Map<String, List<WordOption>> {
         if (wordsCache.size > 2048) wordsCache.clear()
         val children = childrenByParent
