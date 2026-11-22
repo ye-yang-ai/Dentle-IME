@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">Dental IME</string>
+    <string name="setup_title">Dental IME</string>
+    <string name="setup_status_disabled">输入法尚未启用</string>
+    <string name="setup_status_enabled">已启用，请切换到 Dental IME</string>
+    <string name="setup_status_selected">Dental IME 正在使用</string>
+    <string name="enable_keyboard">启用输入法</string>
+    <string name="select_keyboard">切换输入法</string>
+    <string name="test_input">输入测试</string>
+    <string name="test_hint">在这里试用键盘</string>
+    <string name="clear_memory">清除选词记忆</string>
+    <string name="clear_memory_title">清除选词记忆？</string>
+    <string name="clear_memory_message">这会删除本机记录的选词次数。</string>
+    <string name="clear_memory_confirm">清除</string>
+    <string name="clear_memory_cancel">取消</string>
+</resources>
