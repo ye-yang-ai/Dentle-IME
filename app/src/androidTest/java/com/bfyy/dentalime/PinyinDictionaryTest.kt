@@ -271,4 +271,18 @@ class PinyinDictionaryTest {
             memory.clear()
         }
     }
+
+    @Test
+    fun initialsCanBeSelectedAsProgressivePrefixes() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        PinyinDictionary(context, CandidateMemory(context, "prefix_test")).use { dictionary ->
+            val sun = dictionary.lookupPrefixes("tym").firstOrNull { it.candidate.word == "太阳" }
+            assertTrue("tym prefixes", sun != null)
+            assertEquals(2, sun!!.consumed)
+            val although = dictionary.lookupPrefixes("srdr").firstOrNull { it.candidate.word == "虽然" }
+            assertTrue("exact=" + dictionary.lookupExact("sr").toString() +
+                " prefixes=" + dictionary.lookupPrefixes("srdr"), although != null)
+            assertEquals(2, although!!.consumed)
+        }
+    }
 }

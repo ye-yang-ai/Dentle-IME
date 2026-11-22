@@ -21,6 +21,8 @@ data class PinyinCandidate(
     }
 }
 
+data class PinyinPrefixCandidate(val candidate: PinyinCandidate, val consumed: Int)
+
 class PinyinDictionary(
     context: Context,
     private val memory: CandidateMemory = CandidateMemory(context)
@@ -143,6 +145,34 @@ class PinyinDictionary(
     }
 
     fun recordSelection(input: String, word: String) = memory.record(input, word)
+
+    fun memoryCount(input: String, word: String): Int = memory.count(input, word)
+
+    fun lookupPrefixes(input: String, limit: Int = 10): List<PinyinPrefixCandidate> {
+        if (input.length < 2) return emptyList()
+        val result = mutableListOf<PinyinPrefixCandidate>()
+        val seen = hashSetOf<String>()
+        val groups = mutableListOf<List<PinyinPrefixCandidate>>()
+        for (end in (input.length - 1) downTo 2) {
+            val prefix = input.substring(0, end)
+            val choices = lookupExact(prefix, limit)
+                .filter { it.pinyin == prefix }
+                .map {
+                PinyinPrefixCandidate(it, end)
+            }
+            if (choices.isNotEmpty()) groups.add(choices)
+        }
+        var round = 0
+        while (result.size < limit && round < groups.maxOfOrNull { it.size } ?: 0) {
+            groups.forEach { group ->
+                group.getOrNull(round)?.let { choice ->
+                    if (result.size < limit && seen.add(choice.candidate.word)) result.add(choice)
+                }
+            }
+            round++
+        }
+        return result
+    }
 
     private fun sortByMemory(
         input: String, result: List<PinyinCandidate>, limit: Int
