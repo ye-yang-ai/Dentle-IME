@@ -37,7 +37,9 @@ class DentalImeService : InputMethodService() {
     private var editBackLabel: TextView? = null
     private val candidateLabels = mutableListOf<TextView>()
     private val composition = StringBuilder()
+    private val originalInput = StringBuilder()
     private val selectedPrefixes = mutableListOf<SelectedPrefix>()
+    private var remainingInitialPending = false
     private var candidates = emptyList<PinyinCandidate>()
     private val candidateConsumed = mutableListOf<Int>()
     private var sentenceDraft: PinyinCandidate? = null
@@ -104,7 +106,9 @@ class DentalImeService : InputMethodService() {
             inputClass == InputType.TYPE_CLASS_PHONE || inputClass == InputType.TYPE_CLASS_DATETIME
         shifted = false
         composition.clear()
+        originalInput.clear()
         selectedPrefixes.clear()
+        remainingInitialPending = false
         candidates = emptyList()
         candidateConsumed.clear()
         clearSentenceDraft()
@@ -125,7 +129,9 @@ class DentalImeService : InputMethodService() {
     override fun onFinishInput() {
         super.onFinishInput()
         composition.clear()
+        originalInput.clear()
         selectedPrefixes.clear()
+        remainingInitialPending = false
         candidates = emptyList()
         candidateConsumed.clear()
         clearSentenceDraft()
@@ -210,7 +216,7 @@ class DentalImeService : InputMethodService() {
             }
         }.also(row::addView)
         candidateLabels.clear()
-        repeat(11) {
+        repeat(30) {
             candidateLabels.add(candidateLabel().also { row.addView(it) })
         }
         strip.addView(row, ViewGroup.LayoutParams(
@@ -312,7 +318,7 @@ class DentalImeService : InputMethodService() {
                 if (segment != null) {
                     loaded.lookupExact(lookupInput).map { CandidateChoice(it, lookupInput.length) }
                 } else {
-                    val found = loaded.lookup(input)
+                    val found = loaded.lookup(input, if (input.length == 1) 30 else 10)
                     val prefixes = loaded.lookupPrefixes(input)
                     val wholeFirst = found.firstOrNull()?.let {
                         it.segments.size > 1 || loaded.memoryCount(input, it.word) > 0
@@ -325,7 +331,7 @@ class DentalImeService : InputMethodService() {
                             choices.add(CandidateChoice(candidate, input.length))
                         }
                     }
-                    choices.take(10)
+                    choices.take(if (input.length == 1) 30 else 10)
                 }
             }
             result.exceptionOrNull()?.let { Log.e("DentalImeService", "Candidate lookup failed", it) }
@@ -367,7 +373,9 @@ class DentalImeService : InputMethodService() {
         rememberSelection: Boolean = true
     ) {
         if (composition.isEmpty() && selectedPrefixes.isEmpty()) return
-        val input = selectedPrefixes.joinToString("") { it.pinyin } + composition.toString()
+        val input = originalInput.toString().ifEmpty {
+            selectedPrefixes.joinToString("") { it.pinyin } + composition.toString()
+        }
         val finalValue = selectedPrefixes.joinToString("") { it.word } + value
         if (rememberSelection && (sentenceDraft?.word == finalValue ||
                 candidates.any { it.word == value } || selectedPrefixes.isNotEmpty())) {
@@ -375,7 +383,9 @@ class DentalImeService : InputMethodService() {
         }
         currentInputConnection?.commitText(finalValue, 1)
         composition.clear()
+        originalInput.clear()
         selectedPrefixes.clear()
+        remainingInitialPending = false
         candidates = emptyList()
         candidateConsumed.clear()
         clearSentenceDraft()
@@ -386,6 +396,7 @@ class DentalImeService : InputMethodService() {
         if (consumed <= 0 || consumed > composition.length) return
         selectedPrefixes.add(SelectedPrefix(composition.substring(0, consumed), candidate.word))
         composition.delete(0, consumed)
+        remainingInitialPending = composition.length == 1
         currentInputConnection?.setComposingText("", 1)
         if (composition.isNotEmpty()) {
             currentInputConnection?.setComposingText(composition.toString(), 1)
@@ -482,6 +493,9 @@ class DentalImeService : InputMethodService() {
                 if (composition.isNotEmpty()) {
                     clearSentenceDraft()
                     composition.deleteCharAt(composition.lastIndex)
+                    if (selectedPrefixes.isEmpty() && originalInput.isNotEmpty()) {
+                        originalInput.deleteCharAt(originalInput.lastIndex)
+                    }
                     if (composition.isEmpty()) currentInputConnection?.commitText("", 1)
                     else currentInputConnection?.setComposingText(composition.toString(), 1)
                     updateCandidates()
@@ -520,7 +534,16 @@ class DentalImeService : InputMethodService() {
             else -> {
                 if (composingLetter) {
                     clearSentenceDraft()
+                    if (remainingInitialPending && composition.length == 1 &&
+                        composition[0] == label[0]
+                    ) {
+                        remainingInitialPending = false
+                        updateCandidates()
+                        return
+                    }
+                    remainingInitialPending = false
                     composition.append(label)
+                    if (selectedPrefixes.isEmpty()) originalInput.append(label)
                     currentInputConnection?.setComposingText(composition.toString(), 1)
                     updateCandidates()
                     return

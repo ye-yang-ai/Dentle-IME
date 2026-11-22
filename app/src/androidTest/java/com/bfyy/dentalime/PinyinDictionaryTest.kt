@@ -285,4 +285,14 @@ class PinyinDictionaryTest {
             assertEquals(2, although!!.consumed)
         }
     }
+
+    @Test
+    fun singleInitialOffersCharacterCandidates() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        PinyinDictionary(context, CandidateMemory(context, "single_initial_test")).use { dictionary ->
+            val choices = dictionary.lookup("m", limit = 30)
+            assertTrue(choices.map { it.word }.toString(), choices.size >= 20)
+            assertTrue(dictionary.lookup("mao").any { it.word == "猫" })
+        }
+    }
 }

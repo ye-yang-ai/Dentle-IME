@@ -84,10 +84,11 @@ class PinyinDictionary(
                 if (seen.add(candidate.word)) result.add(candidate)
             }
         }
-        if (input.length in 2..MAX_INITIALS_INPUT && result.size < limit) {
+        if (input.length in 1..MAX_INITIALS_INPUT && result.size < limit) {
             collect(
                 "SELECT word, initials FROM entries WHERE initials = ? AND initials != '' " +
-                    "ORDER BY rank DESC, freq DESC LIMIT ${minOf(4, limit - result.size)}",
+                    "ORDER BY rank DESC, freq DESC LIMIT " +
+                    "${if (input.length == 1) limit - result.size else minOf(4, limit - result.size)}",
                 arrayOf(input)
             )
             if (result.size < limit) {
