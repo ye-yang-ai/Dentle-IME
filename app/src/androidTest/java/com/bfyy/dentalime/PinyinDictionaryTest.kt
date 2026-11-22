@@ -12,6 +12,32 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class PinyinDictionaryTest {
     @Test
+    fun t9FindsWordsAndFiltersAmbiguousSpellings() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val memory = CandidateMemory(context, "t9_lookup_test")
+        memory.clear()
+        try {
+            PinyinDictionary(context, memory).use { dictionary ->
+                val hello = dictionary.lookupT9("64426")
+                assertEquals("你好", hello.candidates.first().word)
+                assertTrue("nihao" in hello.spellings)
+                assertTrue(dictionary.lookupT9("64426", "nihao").candidates
+                    .all { it.pinyin == "nihao" })
+                assertEquals("牙体牙髓",
+                    dictionary.lookupT9(T9.encode("yatiyasui")).candidates.first().word)
+                assertEquals("你", dictionary.lookupT9("6").candidates.first().word)
+                val ambiguous = dictionary.lookupT9("64")
+                assertTrue("ni" in ambiguous.spellings)
+                assertTrue("mi" in ambiguous.spellings)
+                dictionary.recordSelection("nihao", "你好")
+                assertEquals("你好", dictionary.lookupT9("64426").candidates.first().word)
+            }
+        } finally {
+            memory.clear()
+        }
+    }
+
+    @Test
     fun dentalTermsAreFirstForFullPinyin() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val dictionary = PinyinDictionary(context)

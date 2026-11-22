@@ -16,6 +16,7 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.TextView
 import java.util.ArrayDeque
 import java.util.concurrent.LinkedBlockingQueue
@@ -23,14 +24,23 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
 class DentalImeService : InputMethodService() {
+    private enum class KeyboardLayout { QWERTY, T9 }
     private data class SelectedPrefix(val pinyin: String, val word: String)
     private data class CandidateChoice(val candidate: PinyinCandidate, val consumed: Int)
     private var chinese = true
     private var symbols = false
     private var shifted = false
+    private var layout = KeyboardLayout.QWERTY
+    private var pendingLayout: KeyboardLayout? = null
+    private val t9Input = StringBuilder()
+    private var t9Spelling: String? = null
+    private var t9Spellings = emptyList<String>()
     private var keyRows: LinearLayout? = null
     private var renderedMode = -1
     private var compositionLabel: TextView? = null
+    private var layoutButton: TextView? = null
+    private var spellingStrip: HorizontalScrollView? = null
+    private var spellingRow: LinearLayout? = null
     private var segmentStrip: HorizontalScrollView? = null
     private var segmentRow: LinearLayout? = null
     private var candidateStrip: HorizontalScrollView? = null
@@ -71,7 +81,7 @@ class DentalImeService : InputMethodService() {
                 }
                 dictionary = loaded
                 dictionaryFailed = loaded == null
-                updateCandidates()
+                updateActiveCandidates()
             }
         }
     }
@@ -107,6 +117,11 @@ class DentalImeService : InputMethodService() {
         symbols = inputClass == InputType.TYPE_CLASS_NUMBER ||
             inputClass == InputType.TYPE_CLASS_PHONE || inputClass == InputType.TYPE_CLASS_DATETIME
         shifted = false
+        layout = preferredLayout()
+        pendingLayout = null
+        t9Input.clear()
+        t9Spelling = null
+        t9Spellings = emptyList()
         composition.clear()
         originalInput.clear()
         selectedPrefixes.clear()
@@ -131,6 +146,10 @@ class DentalImeService : InputMethodService() {
 
     override fun onFinishInput() {
         super.onFinishInput()
+        t9Input.clear()
+        t9Spelling = null
+        t9Spellings = emptyList()
+        pendingLayout = null
         composition.clear()
         originalInput.clear()
         selectedPrefixes.clear()
@@ -155,10 +174,57 @@ class DentalImeService : InputMethodService() {
         super.onDestroy()
     }
 
+    private fun preferredLayout(): KeyboardLayout =
+        if (getSharedPreferences("keyboard_layout", Context.MODE_PRIVATE)
+                .getString("chinese", KeyboardLayout.QWERTY.name) == KeyboardLayout.T9.name
+        ) KeyboardLayout.T9 else KeyboardLayout.QWERTY
+
+    private fun showLayoutMenu(anchor: View) {
+        PopupMenu(this, anchor).apply {
+            menu.add(0, 0, 0, "拼音 26 键").isCheckable = true
+            menu.add(0, 1, 1, "拼音九宫格").isCheckable = true
+            menu.findItem(if ((pendingLayout ?: layout) == KeyboardLayout.T9) 1 else 0)
+                .isChecked = true
+            setOnMenuItemClickListener { item ->
+                val chosen = if (item.itemId == 1) KeyboardLayout.T9 else KeyboardLayout.QWERTY
+                getSharedPreferences("keyboard_layout", Context.MODE_PRIVATE)
+                    .edit().putString("chinese", chosen.name).apply()
+                if (composition.isNotEmpty() || t9Input.isNotEmpty()) {
+                    pendingLayout = chosen.takeIf { it != layout }
+                } else {
+                    layout = chosen
+                    pendingLayout = null
+                    renderKeys()
+                }
+                updateLayoutButton()
+                true
+            }
+            show()
+        }
+    }
+
+    private fun updateLayoutButton() {
+        layoutButton?.apply {
+            val target = pendingLayout ?: layout
+            contentDescription = if (pendingLayout != null) {
+                "选词后切换到${if (target == KeyboardLayout.T9) "拼音九宫格" else "拼音26键"}"
+            } else "切换拼音键盘布局，当前${if (this@DentalImeService.layout == KeyboardLayout.T9) "九宫格" else "26键"}"
+            alpha = if (pendingLayout != null) 0.55f else 1f
+        }
+    }
+
+    private fun applyPendingLayout() {
+        val chosen = pendingLayout ?: return
+        pendingLayout = null
+        layout = chosen
+        renderKeys()
+        updateCandidateViews()
+    }
+
     private fun renderKeys() {
         val rowsContainer = keyRows ?: return
         val mode = (if (chinese) 1 else 0) or (if (symbols) 2 else 0) or
-            (if (shifted) 4 else 0)
+            (if (shifted) 4 else 0) or (if (layout == KeyboardLayout.T9) 8 else 0)
         if (renderedMode == mode && rowsContainer.childCount > 0) return
         rowsContainer.removeAllViews()
         val rows = if (symbols) {
@@ -166,6 +232,12 @@ class DentalImeService : InputMethodService() {
                 listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
                 listOf("@", "#", "$", "%", "&", "-", "+", "(", ")", "_"),
                 listOf("=", "*", "\"", "'", ":", ";", "!", "?", "/", "⌫")
+            )
+        } else if (chinese && layout == KeyboardLayout.T9) {
+            listOf(
+                listOf("1", "2", "3"),
+                listOf("4", "5", "6"),
+                listOf("7", "8", "9")
             )
         } else {
             listOf(
@@ -175,19 +247,36 @@ class DentalImeService : InputMethodService() {
             )
         }
         rows.forEach { rowsContainer.addKeyRow(it) }
-        rowsContainer.addKeyRow(listOf(if (chinese) "中" else "EN", if (symbols) "ABC" else "?123", "🌐", ",", "space", ".", "↵"))
+        rowsContainer.addKeyRow(if (chinese && layout == KeyboardLayout.T9 && !symbols) {
+            listOf("中", "?123", "🌐", ",", "0", ".", "⌫", "↵")
+        } else {
+            listOf(if (chinese) "中" else "EN", if (symbols) "ABC" else "?123", "🌐", ",", "space", ".", "↵")
+        })
         renderedMode = mode
+        updateLayoutButton()
     }
 
     private fun LinearLayout.addCandidateArea() {
+        val compositionBar = LinearLayout(this@DentalImeService).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        layoutButton = TextView(this@DentalImeService).apply {
+            text = "⌨"
+            textSize = 21f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(24, 39, 42))
+            setOnClickListener { showLayoutMenu(this) }
+        }.also { compositionBar.addView(it, LinearLayout.LayoutParams(dp(40), dp(26))) }
         compositionLabel = TextView(this@DentalImeService).apply {
             textSize = 14f
             setTextColor(Color.rgb(42, 85, 92))
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(9), 0, 0, 0)
         }.also {
-            addView(it, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(26)))
+            compositionBar.addView(it, LinearLayout.LayoutParams(0, dp(26), 1f))
         }
+        addView(compositionBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(26)))
+        updateLayoutButton()
 
         segmentStrip = HorizontalScrollView(this@DentalImeService).apply {
             isHorizontalScrollBarEnabled = false
@@ -202,6 +291,16 @@ class DentalImeService : InputMethodService() {
                 ))
             }
             addView(strip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(36)))
+        }
+
+        spellingStrip = HorizontalScrollView(this@DentalImeService).apply {
+            isHorizontalScrollBarEnabled = false
+            visibility = View.GONE
+        }.also { strip ->
+            spellingRow = LinearLayout(this@DentalImeService).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }.also { strip.addView(it) }
+            addView(strip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(32)))
         }
 
         val strip = HorizontalScrollView(this@DentalImeService).apply {
@@ -249,7 +348,33 @@ class DentalImeService : InputMethodService() {
     }
 
     private fun updateCandidateViews() {
-        compositionLabel?.text = selectedPrefixes.joinToString("") { it.word } + composition.toString()
+        compositionLabel?.text = if (layout == KeyboardLayout.T9 && chinese && !symbols) {
+            t9Spelling?.let { "$it  ${t9Input}" } ?: t9Input.toString()
+        } else selectedPrefixes.joinToString("") { it.word } + composition.toString()
+        spellingRow?.apply {
+            removeAllViews()
+            if (layout == KeyboardLayout.T9 && t9Input.isNotEmpty()) {
+                t9Spellings.forEach { spelling ->
+                    addView(TextView(this@DentalImeService).apply {
+                        text = spelling
+                        textSize = 15f
+                        gravity = Gravity.CENTER
+                        setPadding(dp(12), 0, dp(12), 0)
+                        setTextColor(Color.rgb(24, 39, 42))
+                        setBackgroundColor(if (spelling == t9Spelling) Color.rgb(140, 198, 189)
+                            else Color.TRANSPARENT)
+                        setOnClickListener {
+                            t9Spelling = if (t9Spelling == spelling) null else spelling
+                            updateT9Candidates()
+                        }
+                    }, LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT, dp(32)
+                    ))
+                }
+            }
+        }
+        spellingStrip?.visibility = if (layout == KeyboardLayout.T9 && t9Input.isNotEmpty())
+            View.VISIBLE else View.GONE
         val draft = sentenceDraft
         segmentRow?.apply {
             removeAllViews()
@@ -294,7 +419,8 @@ class DentalImeService : InputMethodService() {
                     label.text = candidate.word
                     label.contentDescription = "${candidate.word}，${candidate.pinyin}"
                     label.setOnClickListener {
-                        if (editingSegment != null) replaceDraftSegment(candidate.word)
+                        if (layout == KeyboardLayout.T9 && t9Input.isNotEmpty()) commitT9(candidate)
+                        else if (editingSegment != null) replaceDraftSegment(candidate.word)
                         else {
                             val consumed = candidateConsumed.getOrNull(index) ?: composition.length
                             if (consumed < composition.length) selectPrefix(candidate, consumed)
@@ -314,6 +440,64 @@ class DentalImeService : InputMethodService() {
             }
         }
         candidateStrip?.takeIf { it.scrollX != 0 }?.scrollTo(0, 0)
+    }
+
+    private fun updateActiveCandidates() {
+        if (layout == KeyboardLayout.T9 && t9Input.isNotEmpty()) updateT9Candidates()
+        else updateCandidates()
+    }
+
+    private fun updateT9Candidates() {
+        val code = t9Input.toString()
+        val spelling = t9Spelling
+        val generation = ++candidateGeneration
+        val loaded = dictionary
+        candidates = emptyList()
+        candidateConsumed.clear()
+        updateCandidateViews()
+        if (code.isEmpty() || loaded == null) {
+            lookupPending = code.isNotEmpty() && loaded == null && !dictionaryFailed
+            if (!lookupPending) drainPendingKeys()
+            return
+        }
+        lookupPending = true
+        dictionaryWorker.queue.clear()
+        dictionaryWorker.execute {
+            val result = runCatching { loaded.lookupT9(code, spelling) }
+            result.exceptionOrNull()?.let { Log.e("DentalImeService", "T9 lookup failed", it) }
+            mainHandler.post {
+                if (destroyed || generation != candidateGeneration) return@post
+                lookupPending = false
+                val found = result.getOrDefault(T9Lookup(emptyList(), emptyList()))
+                candidates = found.candidates
+                t9Spellings = found.spellings
+                ensureCandidateLabels(candidates.size)
+                updateCandidateViews()
+                drainPendingKeys()
+            }
+        }
+    }
+
+    private fun commitT9(candidate: PinyinCandidate) {
+        dictionary?.recordSelection(candidate.pinyin, candidate.word)
+        currentInputConnection?.commitText(candidate.word, 1)
+        t9Input.clear()
+        t9Spelling = null
+        t9Spellings = emptyList()
+        candidates = emptyList()
+        lookupPending = false
+        candidateGeneration++
+        dictionaryWorker.queue.clear()
+        updateCandidateViews()
+        applyPendingLayout()
+    }
+
+    private fun commitActiveComposition(): Boolean {
+        if (layout == KeyboardLayout.T9 && t9Input.isNotEmpty()) {
+            val first = candidates.firstOrNull() ?: return false
+            commitT9(first)
+        } else commitComposition()
+        return true
     }
 
     private fun updateCandidates() {
@@ -445,6 +629,7 @@ class DentalImeService : InputMethodService() {
         candidateConsumed.clear()
         clearSentenceDraft()
         updateCandidateViews()
+        applyPendingLayout()
     }
 
     private fun selectPrefix(candidate: PinyinCandidate, consumed: Int) {
@@ -485,14 +670,20 @@ class DentalImeService : InputMethodService() {
             )
         }
         labels.forEach { label ->
+            val t9Key = chinese && !symbols && layout == KeyboardLayout.T9
             val key = TextView(this@DentalImeService).apply {
                 text = when {
+                    t9Key && label.length == 1 && label[0] in '2'..'9' ->
+                        "$label\n${T9.letters(label[0]).uppercase()}"
+                    t9Key && label == "1" -> "1\n符"
+                    t9Key && label == "0" -> "0 空格"
                     label == "space" -> if (chinese) "中文" else "English"
                     shifted && label.length == 1 && label[0].isLetter() -> label.uppercase()
                     else -> label
                 }
                 gravity = Gravity.CENTER
-                textSize = if (label == "space" || label == "?123") 14f else 21f
+                textSize = if (t9Key && label.length == 1 && label[0] in '0'..'9') 15f
+                    else if (label == "space" || label == "?123") 14f else 21f
                 typeface = Typeface.DEFAULT_BOLD
                 setTextColor(Color.rgb(24, 39, 42))
                 background = GradientDrawable().apply {
@@ -507,11 +698,22 @@ class DentalImeService : InputMethodService() {
                     "🌐" -> "切换输入法"
                     "space" -> "空格"
                     "中", "EN" -> "切换中英文"
+                    "1" -> if (t9Key) "符号" else label
+                    "0" -> if (t9Key) "空格，长按输入数字0" else label
                     else -> label
                 }
-                setOnClickListener { press(label) }
+                val action = if (t9Key && label == "1") "?123"
+                    else if (t9Key && label == "0") "space" else label
+                setOnClickListener { press(action) }
+                if (t9Key && label.length == 1 && label[0] in '0'..'9') {
+                    setOnLongClickListener {
+                        if (t9Input.isEmpty()) currentInputConnection?.commitText(label, 1)
+                        true
+                    }
+                }
             }
-            val weight = if (label == "space") 3.2f else if (label in listOf("?123", "ABC")) 1.5f else 1f
+            val weight = if (label == "space" || (t9Key && label == "0")) 3.2f
+                else if (label in listOf("?123", "ABC")) 1.5f else 1f
             row.addView(key, LinearLayout.LayoutParams(0, dp(45), weight).apply {
                 setMargins(dp(2), dp(2), dp(2), dp(2))
             })
@@ -521,30 +723,42 @@ class DentalImeService : InputMethodService() {
 
     private fun press(label: String) {
         val composingLetter = chinese && !symbols && !shifted &&
-            label.length == 1 && label[0] in 'a'..'z'
-        if (pendingKeys.isNotEmpty() || (composition.isNotEmpty() && lookupPending &&
-                label != "⌫" && label != "🌐" && !composingLetter)) {
+            layout == KeyboardLayout.QWERTY && label.length == 1 && label[0] in 'a'..'z'
+        val composingT9 = chinese && !symbols && layout == KeyboardLayout.T9 &&
+            label.length == 1 && label[0] in '2'..'9'
+        if (pendingKeys.isNotEmpty() || ((composition.isNotEmpty() || t9Input.isNotEmpty()) &&
+                lookupPending && label != "⌫" && label != "🌐" &&
+                !composingLetter && !composingT9)) {
             pendingKeys.addLast(label)
             return
         }
         when (label) {
             "中", "EN" -> {
-                commitComposition()
+                if (!commitActiveComposition()) return
                 chinese = !chinese
                 shifted = false
                 renderKeys()
             }
             "?123", "ABC" -> {
-                commitComposition()
+                if (!commitActiveComposition()) return
                 symbols = !symbols
                 renderKeys()
             }
             "⇧" -> {
-                commitComposition()
+                if (!commitActiveComposition()) return
                 shifted = !shifted
                 renderKeys()
             }
             "⌫" -> {
+                if (t9Input.isNotEmpty()) {
+                    if (t9Spelling != null) t9Spelling = null
+                    else t9Input.deleteCharAt(t9Input.lastIndex)
+                    if (t9Input.isEmpty()) currentInputConnection?.commitText("", 1)
+                    else currentInputConnection?.setComposingText(t9Input.toString(), 1)
+                    updateT9Candidates()
+                    if (t9Input.isEmpty()) applyPendingLayout()
+                    return
+                }
                 if (composition.isNotEmpty()) {
                     clearSentenceDraft()
                     composition.deleteCharAt(composition.lastIndex)
@@ -554,6 +768,7 @@ class DentalImeService : InputMethodService() {
                     if (composition.isEmpty()) currentInputConnection?.commitText("", 1)
                     else currentInputConnection?.setComposingText(composition.toString(), 1)
                     updateCandidates()
+                    if (composition.isEmpty()) applyPendingLayout()
                     return
                 }
                 if (selectedPrefixes.isNotEmpty()) {
@@ -571,7 +786,7 @@ class DentalImeService : InputMethodService() {
             "🌐" -> (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
                 .showInputMethodPicker()
             "↵" -> {
-                commitComposition()
+                if (!commitActiveComposition()) return
                 val action = currentInputEditorInfo?.imeOptions?.and(EditorInfo.IME_MASK_ACTION)
                 if (action != null && action != EditorInfo.IME_ACTION_NONE &&
                     action != EditorInfo.IME_ACTION_UNSPECIFIED
@@ -579,7 +794,9 @@ class DentalImeService : InputMethodService() {
                 else currentInputConnection?.commitText("\n", 1)
             }
             "space" -> {
-                if (editingSegment != null && candidates.isNotEmpty()) {
+                if (t9Input.isNotEmpty()) {
+                    candidates.firstOrNull()?.let(::commitT9)
+                } else if (editingSegment != null && candidates.isNotEmpty()) {
                     replaceDraftSegment(candidates.first().word)
                 } else if (composition.isNotEmpty() || selectedPrefixes.isNotEmpty()) {
                     commitComposition(rememberSelection = true)
@@ -587,6 +804,15 @@ class DentalImeService : InputMethodService() {
                 else currentInputConnection?.commitText(" ", 1)
             }
             else -> {
+                if (composingT9) {
+                    if (t9Input.length >= 32) return
+                    t9Input.append(label)
+                    t9Spelling = null
+                    t9Spellings = emptyList()
+                    currentInputConnection?.setComposingText(t9Input.toString(), 1)
+                    updateT9Candidates()
+                    return
+                }
                 if (composingLetter) {
                     clearSentenceDraft()
                     if (remainingInitialPending && composition.length == 1 &&
@@ -603,7 +829,7 @@ class DentalImeService : InputMethodService() {
                     updateCandidates()
                     return
                 }
-                commitComposition()
+                if (!commitActiveComposition()) return
                 val value = if (chinese && label == ",") "，"
                     else if (chinese && label == ".") "。"
                     else if (shifted) label.uppercase() else label

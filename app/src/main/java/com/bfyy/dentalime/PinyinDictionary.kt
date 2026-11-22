@@ -22,6 +22,7 @@ data class PinyinCandidate(
 }
 
 data class PinyinPrefixCandidate(val candidate: PinyinCandidate, val consumed: Int)
+data class T9Lookup(val candidates: List<PinyinCandidate>, val spellings: List<String>)
 
 class PinyinDictionary(
     context: Context,
@@ -105,6 +106,41 @@ class PinyinDictionary(
             )
         }
         return sortByMemory(input, result, limit)
+    }
+
+    fun lookupT9(code: String, selectedSpelling: String? = null, limit: Int = 40): T9Lookup {
+        if (code.isEmpty() || code.any { it !in '2'..'9' }) return T9Lookup(emptyList(), emptyList())
+        val exact = mutableListOf<PinyinCandidate>()
+        database.rawQuery(
+            "SELECT word, pinyin FROM entries WHERE t9_code = ? " +
+                "ORDER BY rank DESC, freq DESC LIMIT ${limit * 3}",
+            arrayOf(code)
+        ).use { cursor ->
+            while (cursor.moveToNext()) exact.add(PinyinCandidate(cursor.getString(0), cursor.getString(1)))
+        }
+        val prefix = mutableListOf<PinyinCandidate>()
+        if (exact.size < limit && code.length <= 12) {
+            database.rawQuery(
+                "SELECT word, pinyin FROM entries WHERE t9_code > ? AND t9_code < ? " +
+                    "ORDER BY length(t9_code), rank DESC, freq DESC LIMIT ${limit * 3}",
+                arrayOf(code, "$code:")
+            ).use { cursor ->
+                while (cursor.moveToNext()) prefix.add(PinyinCandidate(cursor.getString(0), cursor.getString(1)))
+            }
+        }
+        val all = (if (code.length == 1) prefix + exact else exact + prefix)
+            .distinctBy { it.word to it.pinyin }
+        val spellings = all.map { it.pinyin }.distinct().take(24)
+        val candidates = if (selectedSpelling == null) all else {
+            if (T9.encode(selectedSpelling) == code) lookupAllExact(selectedSpelling)
+            else all.filter { it.pinyin == selectedSpelling }
+        }
+        return T9Lookup(
+            candidates.sortedWith(compareByDescending<PinyinCandidate> {
+                memory.count(it.pinyin, it.word)
+            }).distinctBy { it.word }.take(limit),
+            spellings
+        )
     }
 
     fun lookupExact(input: String, limit: Int = 10): List<PinyinCandidate> {
