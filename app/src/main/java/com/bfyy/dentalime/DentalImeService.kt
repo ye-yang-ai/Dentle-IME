@@ -320,15 +320,21 @@ class DentalImeService : InputMethodService() {
                 } else {
                     val found = loaded.lookup(input, if (input.length == 1) 30 else 10)
                     val prefixes = loaded.lookupPrefixes(input)
-                    val wholeFirst = found.firstOrNull()?.let {
-                        it.segments.size > 1 || loaded.memoryCount(input, it.word) > 0
-                    } == true
+                    val wholeFirst = found.any {
+                        it.pinyin == input || it.segments.size > 1 ||
+                            loaded.memoryCount(input, it.word) > 0
+                    }
                     val choices = mutableListOf<CandidateChoice>()
-                    if (wholeFirst) choices.add(CandidateChoice(found.first(), input.length))
-                    prefixes.forEach { choices.add(CandidateChoice(it.candidate, it.consumed)) }
-                    found.forEach { candidate ->
-                        if (choices.none { it.candidate.word == candidate.word }) {
-                            choices.add(CandidateChoice(candidate, input.length))
+                    val ordered = if (wholeFirst) {
+                        found.map { CandidateChoice(it, input.length) } +
+                            prefixes.map { CandidateChoice(it.candidate, it.consumed) }
+                    } else {
+                        prefixes.map { CandidateChoice(it.candidate, it.consumed) } +
+                            found.map { CandidateChoice(it, input.length) }
+                    }
+                    ordered.forEach { choice ->
+                        if (choices.none { it.candidate.word == choice.candidate.word }) {
+                            choices.add(choice)
                         }
                     }
                     choices.take(if (input.length == 1) 30 else 10)
