@@ -34,6 +34,7 @@ class DentalImeService : InputMethodService() {
     private var segmentStrip: HorizontalScrollView? = null
     private var segmentRow: LinearLayout? = null
     private var candidateStrip: HorizontalScrollView? = null
+    private var candidateRow: LinearLayout? = null
     private var editBackLabel: TextView? = null
     private val candidateLabels = mutableListOf<TextView>()
     private val composition = StringBuilder()
@@ -215,10 +216,9 @@ class DentalImeService : InputMethodService() {
                 updateCandidates()
             }
         }.also(row::addView)
+        candidateRow = row
         candidateLabels.clear()
-        repeat(30) {
-            candidateLabels.add(candidateLabel().also { row.addView(it) })
-        }
+        ensureCandidateLabels(50)
         strip.addView(row, ViewGroup.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.MATCH_PARENT
@@ -237,6 +237,13 @@ class DentalImeService : InputMethodService() {
                 LinearLayout.LayoutParams.WRAP_CONTENT, dp(44)
             )
         }
+
+    private fun ensureCandidateLabels(count: Int) {
+        val row = candidateRow ?: return
+        while (candidateLabels.size < count) {
+            candidateLabels.add(candidateLabel().also { row.addView(it) })
+        }
+    }
 
     private fun updateCandidateViews() {
         compositionLabel?.text = selectedPrefixes.joinToString("") { it.word } + composition.toString()
@@ -316,9 +323,13 @@ class DentalImeService : InputMethodService() {
         dictionaryWorker.execute {
             val result = runCatching {
                 if (segment != null) {
-                    loaded.lookupExact(lookupInput).map { CandidateChoice(it, lookupInput.length) }
+                    loaded.lookupExact(lookupInput, if (lookupInput.length <= 5) 600 else 10)
+                        .map { CandidateChoice(it, lookupInput.length) }
                 } else {
-                    val found = loaded.lookup(input, if (input.length == 1) 30 else 10)
+                    // Short complete syllables are character lookups; long input is
+                    // sentence composition and should keep a smaller responsive list.
+                    val candidateLimit = if (input.length <= 5) 600 else 10
+                    val found = loaded.lookup(input, candidateLimit)
                     val prefixes = loaded.lookupPrefixes(input)
                     val wholeFirst = found.any {
                         it.pinyin == input || it.segments.size > 1 ||
@@ -337,7 +348,7 @@ class DentalImeService : InputMethodService() {
                             choices.add(choice)
                         }
                     }
-                    choices.take(if (input.length == 1) 30 else 10)
+                    choices.take(candidateLimit)
                 }
             }
             result.exceptionOrNull()?.let { Log.e("DentalImeService", "Candidate lookup failed", it) }
@@ -360,6 +371,7 @@ class DentalImeService : InputMethodService() {
                         sentenceDraft = found.firstOrNull()?.takeIf { it.segments.size > 1 && it.pinyin == input }
                     }
                 }
+                ensureCandidateLabels(candidates.size)
                 updateCandidateViews()
                 drainPendingKeys()
             }

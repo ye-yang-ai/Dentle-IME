@@ -43,6 +43,19 @@ class PinyinDictionaryTest {
     }
 
     @Test
+    fun completePinyinExposesTheCharacterIndex() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        PinyinDictionary(context, CandidateMemory(context, "character_index_test")).use { dictionary ->
+            val yang = dictionary.lookupExact("yang", limit = 200).map { it.word }
+            assertTrue(yang.toString(), yang.size >= 100)
+            assertTrue(yang.toString(), "杨" in yang)
+            assertTrue(yang.toString(), "阳" in yang)
+            assertTrue(yang.toString(), "羊" in yang)
+            assertTrue(dictionary.lookupExact("mao", limit = 100).any { it.word == "猫" })
+        }
+    }
+
+    @Test
     fun selectedWordMovesAheadAndCanBeCleared() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val memory = CandidateMemory(context, "candidate_memory_test")

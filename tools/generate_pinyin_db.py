@@ -24,6 +24,7 @@ DENTAL_HANZI = re.compile(r"^[\u3400-\u9fff]{2,12}$")
 PHRASE_HANZI = re.compile(r"^[\u3400-\u9fff]{2,6}$")
 MAX_WORDS = 120_000
 MIN_CONVERSATION_SCORE = 200
+HANZI_CODEPOINTS = range(0x3400, 0xA000)
 
 
 def readings(word: str) -> set[str]:
@@ -38,6 +39,24 @@ def readings(word: str) -> set[str]:
             alternate[index + 1] = "xue"
             keys.add("".join(alternate).replace("ü", "v"))
     return keys
+
+
+def add_character_entries(connection: sqlite3.Connection) -> int:
+    """Add a character-level index so exact pinyin can expose every known Han character."""
+    rows = []
+    for codepoint in HANZI_CODEPOINTS:
+        word = chr(codepoint)
+        for key in readings(word):
+            if key.isascii() and key.isalpha():
+                rows.append((key, word, 1, 0, 1))
+    connection.executemany(
+        "INSERT INTO entries (pinyin, word, freq, domain, rank) "
+        "SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+        "SELECT 1 FROM entries WHERE pinyin = ? AND word = ?)",
+        ((key, word, freq, domain, rank, key, word)
+         for key, word, freq, domain, rank in rows),
+    )
+    return len(rows)
 
 
 def dental_terms() -> list[str]:
@@ -119,6 +138,7 @@ def main() -> None:
             "rank = max(entries.rank, excluded.rank)",
             phrase_rows,
         )
+        character_rows = add_character_entries(connection)
         for word in specialized:
             for key in readings(word):
                 if not key.isascii() or not key.isalpha():
@@ -144,7 +164,8 @@ def main() -> None:
         connection.execute("VACUUM")
         print(
             f"Wrote {len(rows)} base readings, {len(phrase_rows)} conversation phrases, "
-            f"{len(specialized)} dental terms, and {len(transitions)} transitions to {OUTPUT}"
+            f"{character_rows} character readings, {len(specialized)} dental terms, "
+            f"and {len(transitions)} transitions to {OUTPUT}"
         )
     finally:
         connection.close()
