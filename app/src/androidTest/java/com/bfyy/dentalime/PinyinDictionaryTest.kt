@@ -1,5 +1,6 @@
 package com.bfyy.dentalime
 
+import android.database.sqlite.SQLiteDatabase
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
@@ -57,6 +58,32 @@ class PinyinDictionaryTest {
                 assertEquals("正畸", dictionary.lookup("zhengji").first().word)
                 memory.clear()
                 assertEquals("征集", dictionary.lookup("zhengji").first().word)
+            }
+        } finally {
+            memory.clear()
+        }
+    }
+
+    @Test
+    fun rememberedSentenceReturnsEvenWhenOutsideDefaultCandidates() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val memory = CandidateMemory(context, "sentence_recall_test")
+        memory.clear()
+        try {
+            val originalFirst = PinyinDictionary(context, memory).use { dictionary ->
+                dictionary.lookup("srds", limit = 2).first().word
+            }
+            assertTrue(originalFirst != "虽然但是")
+            PinyinDictionary(context, memory).use { dictionary ->
+                dictionary.recordSelection("srds", "虽然但是")
+                assertEquals("虽然但是", dictionary.lookup("srds", limit = 2).first().word)
+                assertEquals("虽然但是", dictionary.lookup("srds").first().word)
+                assertTrue(dictionary.lookup("srdsx").firstOrNull()?.word != "虽然但是")
+            }
+            PinyinDictionary(context, CandidateMemory(context, "sentence_recall_test")).use { dictionary ->
+                assertEquals("虽然但是", dictionary.lookup("srds").first().word)
+                memory.clear()
+                assertEquals(originalFirst, dictionary.lookup("srds", limit = 2).first().word)
             }
         } finally {
             memory.clear()
@@ -184,6 +211,61 @@ class PinyinDictionaryTest {
                 dictionary.recordSelection("whxn", "我很想你")
                 assertEquals("我很想你", dictionary.lookup("whxn").first().word)
                 assertEquals("我好想你", dictionary.lookup("wohaoxiangni").first().word)
+            }
+        } finally {
+            memory.clear()
+        }
+    }
+
+    @Test
+    fun mixedPinyinComposesWordsAndSupportsSegmentCorrection() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val memory = CandidateMemory(context, "mixed_test")
+        memory.clear()
+        try {
+            PinyinDictionary(context, memory).use { dictionary ->
+                val input = "woxihn"
+                SQLiteDatabase.openDatabase(
+                    context.noBackupFilesDir.resolve("pinyin.db").path,
+                    null, SQLiteDatabase.OPEN_READONLY
+                ).use { database ->
+                    val options = MixedPinyinMatcher(database).options(input)
+                    assertTrue(options["woxih"].orEmpty().toString(),
+                        options["woxih"].orEmpty().any { it.word == "我喜欢" })
+                    assertTrue(options["n"].orEmpty().toString(),
+                        options["n"].orEmpty().any { it.word == "你" })
+                }
+                SQLiteDatabase.openDatabase(
+                    context.noBackupFilesDir.resolve("pinyin.db").path,
+                    null, SQLiteDatabase.OPEN_READONLY
+                ).use { database ->
+                    val options = MixedPinyinMatcher(database).options("wjintianyaobaya")
+                    assertTrue(options["wjintian"].orEmpty().toString(),
+                        options["wjintian"].orEmpty().any { it.word == "我今天" })
+                    assertTrue(options["baya"].orEmpty().toString(),
+                        options["baya"].orEmpty().any { it.word == "拔牙" })
+                }
+                val choices = dictionary.lookup(input)
+                val sentence = choices.firstOrNull { it.word == "我喜欢你" }
+                assertTrue(choices.map { it.word }.toString(), sentence != null)
+                assertTrue(choices.map { it.word }.toString(),
+                    choices.indexOfFirst { it.word == "我喜欢你" } < 3)
+                assertEquals(0, sentence!!.segments.first().start)
+                assertEquals(input.length, sentence.segments.last().end)
+                assertEquals(sentence.word, sentence.segments.joinToString("") { it.word })
+                sentence.segments.zipWithNext().forEach { (left, right) ->
+                    assertEquals(left.end, right.start)
+                }
+                assertTrue(dictionary.lookupExact("xih").any { it.word == "喜欢" })
+                assertTrue(dictionary.lookup("wxihn").any { it.word == "我喜欢你" })
+                assertTrue(dictionary.lookup("genjzhouyan").any { it.word == "根尖周炎" })
+                val longChoices = dictionary.lookup("wjintianyaobaya")
+                assertTrue(longChoices.map { it.word }.toString(),
+                    longChoices.any { it.word == "我今天要拔牙" })
+                dictionary.recordSelection(input, "我喜欢你")
+                assertEquals("我喜欢你", dictionary.lookup(input).first().word)
+                assertEquals("我好想你", dictionary.lookup("wohaoxiangni").first().word)
+                assertTrue(dictionary.lookup("whxn").any { it.word == "我很想你" })
             }
         } finally {
             memory.clear()

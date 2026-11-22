@@ -2,7 +2,9 @@ package com.bfyy.dentalime
 
 import kotlin.math.ln
 
-internal data class WordOption(val word: String, val rank: Int, val domain: Int = 0)
+internal data class WordOption(
+    val word: String, val rank: Int, val domain: Int = 0, val spellingMask: Int = 0
+)
 
 internal object SentenceComposer {
     const val MAX_WORD_PINYIN = 30
@@ -15,7 +17,8 @@ internal object SentenceComposer {
         val score: Double,
         val words: Int,
         val lastWord: String,
-        val tail: SegmentNode?
+        val tail: SegmentNode?,
+        val spellingMask: Int
     )
 
     private data class SegmentNode(val segment: PinyinSegment, val previous: SegmentNode?)
@@ -25,11 +28,13 @@ internal object SentenceComposer {
         options: Map<String, List<WordOption>>,
         transitions: Map<Pair<String, String>, Int>,
         limit: Int,
-        initials: Boolean = false
+        initials: Boolean = false,
+        mixed: Boolean = false
     ): List<PinyinCandidate> {
-        val beamWidth = if (initials) 96 else BEAM_WIDTH
+        val diverse = initials || mixed
+        val beamWidth = if (mixed) 64 else if (diverse) 96 else BEAM_WIDTH
         val paths = Array(input.length + 1) { mutableListOf<Path>() }
-        paths[0].add(Path("", 0.0, 0, "", null))
+        paths[0].add(Path("", 0.0, 0, "", null, 0))
 
         for (start in input.indices) {
             if (paths[start].isEmpty()) continue
@@ -41,8 +46,9 @@ internal object SentenceComposer {
                         val transition = transitions[path.lastWord to word.word]
                         val contextBonus = if (transition == null) 0.0
                             else ((550 - transition) / 20.0).coerceIn(0.0, 6.0)
-                        val phraseBonus = if (initials && word.domain == 2) 2.5 else 0.0
-                        val singleCharacterPenalty = if (initials && word.word.length == 1) 2.5 else 0.0
+                        val phraseBonus = if (mixed && word.domain == 1) 8.0
+                            else if (diverse && word.domain == 2) 2.5 else 0.0
+                        val singleCharacterPenalty = if (diverse && word.word.length == 1) 2.5 else 0.0
                         destination.add(
                             Path(
                                 path.text + word.word,
@@ -50,22 +56,23 @@ internal object SentenceComposer {
                                     contextBonus + phraseBonus - singleCharacterPenalty,
                                 path.words + 1,
                                 word.word,
-                                SegmentNode(PinyinSegment(start, end, word.word), path.tail)
+                                SegmentNode(PinyinSegment(start, end, word.word), path.tail),
+                                path.spellingMask or word.spellingMask
                             )
                         )
                     }
                 }
-                if (destination.size > beamWidth * 2) prune(destination, beamWidth, initials)
+                if (destination.size > beamWidth * 2) prune(destination, beamWidth, diverse, mixed)
             }
         }
 
-        if (initials && paths[input.length].size > beamWidth) {
-            prune(paths[input.length], beamWidth, initials)
+        if (diverse && paths[input.length].size > beamWidth) {
+            prune(paths[input.length], beamWidth, diverse, mixed)
         }
 
         return paths[input.length]
             .asSequence()
-            .filter { it.words > 1 }
+            .filter { if (mixed) it.words > 0 && it.spellingMask == 3 else it.words > 1 }
             .sortedByDescending { it.score }
             .distinctBy { it.text }
             .take(limit)
@@ -81,12 +88,18 @@ internal object SentenceComposer {
             .toList()
     }
 
-    private fun prune(paths: MutableList<Path>, beamWidth: Int, initials: Boolean) {
-        val ranked = paths.sortedByDescending { it.score }.distinctBy { it.text }
-        val varied = if (initials) ranked.distinctBy { it.text.take(2) }.take(beamWidth / 2)
+    private fun prune(paths: MutableList<Path>, beamWidth: Int, diverse: Boolean, mixed: Boolean) {
+        val ranked = paths.sortedByDescending { it.score }
+            .distinctBy { if (mixed) it.text to it.spellingMask else it.text to 0 }
+        val varied = if (diverse) ranked.distinctBy {
+            (if (mixed) it.text.take(2) + it.text.takeLast(1) else it.text.take(2)) to
+                (if (mixed) it.spellingMask else 0)
+        }
+            .take(beamWidth / 2)
             else emptyList()
-        val kept = varied.mapTo(hashSetOf()) { it.text }
-        val best = varied + ranked.filter { kept.add(it.text) }.take(beamWidth - varied.size)
+        val kept = varied.mapTo(hashSetOf()) { it.text to it.spellingMask }
+        val best = varied + ranked.filter { kept.add(it.text to it.spellingMask) }
+            .take(beamWidth - varied.size)
         paths.clear()
         paths.addAll(best)
     }

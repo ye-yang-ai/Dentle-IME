@@ -29,9 +29,11 @@ class PinyinDictionary(
         const val MAX_INITIALS_INPUT = 20
         const val MAX_INITIALS_WORD = 12
         const val INITIALS_OPTIONS_PER_KEY = 24
+        const val MAX_MIXED_INPUT = 40
     }
 
     private val database: SQLiteDatabase
+    private val mixedMatcher: MixedPinyinMatcher by lazy { MixedPinyinMatcher(database) }
 
     init {
         val file = File(context.noBackupFilesDir, "pinyin.db")
@@ -54,6 +56,8 @@ class PinyinDictionary(
         if (input.isEmpty()) return emptyList()
         val result = mutableListOf<PinyinCandidate>()
         val seen = hashSetOf<String>()
+        val needsMixed = input.length in 3..MAX_MIXED_INPUT &&
+            !mixedMatcher.canSpellFully(input)
 
         fun collect(sql: String, args: Array<String>) {
             database.rawQuery(sql, args).use { cursor ->
@@ -68,6 +72,11 @@ class PinyinDictionary(
             "SELECT word, pinyin FROM entries WHERE pinyin = ? ORDER BY rank DESC, freq DESC LIMIT $limit",
             arrayOf(input)
         )
+        if (needsMixed && result.size < limit) {
+            for (candidate in mixedCandidates(input, limit - result.size)) {
+                if (seen.add(candidate.word)) result.add(candidate)
+            }
+        }
         if (input.length in 6..SentenceComposer.MAX_INPUT_PINYIN && result.size < limit) {
             for (candidate in sentenceCandidates(input, limit - result.size)) {
                 if (seen.add(candidate.word)) result.add(candidate)
@@ -92,7 +101,7 @@ class PinyinDictionary(
                 arrayOf(input, "$input{")
             )
         }
-        return sortByMemory(input, result)
+        return sortByMemory(input, result, limit)
     }
 
     fun lookupExact(input: String, limit: Int = 10): List<PinyinCandidate> {
@@ -120,17 +129,36 @@ class PinyinDictionary(
                 }
             }
         }
-        return sortByMemory(input, result)
+        if (input.length in 3..MAX_MIXED_INPUT && result.size < limit &&
+            !mixedMatcher.canSpellFully(input)) {
+            val choices = mixedMatcher.options(input)[input].orEmpty()
+                .filter { it.spellingMask == 3 }
+                .sortedByDescending { it.rank }
+            for (choice in choices) {
+                if (result.size == limit) break
+                if (seen.add(choice.word)) result.add(PinyinCandidate(choice.word, input))
+            }
+        }
+        return sortByMemory(input, result, limit)
     }
 
     fun recordSelection(input: String, word: String) = memory.record(input, word)
 
-    private fun sortByMemory(input: String, result: List<PinyinCandidate>): List<PinyinCandidate> =
-        result.withIndex()
+    private fun sortByMemory(
+        input: String, result: List<PinyinCandidate>, limit: Int
+    ): List<PinyinCandidate> {
+        val byWord = result.associateBy { it.word }
+        val recalled = memory.remembered(input, limit).map { word ->
+            byWord[word] ?: PinyinCandidate(word, input)
+        }
+        val combined = (recalled + result).distinctBy { it.word }
+        return combined.withIndex()
             .sortedWith(compareByDescending<IndexedValue<PinyinCandidate>> {
                 memory.count(input, it.value.word)
             }.thenBy { it.index })
             .map { it.value }
+            .take(limit)
+    }
 
     private fun sentenceCandidates(input: String, limit: Int): List<PinyinCandidate> {
         val keys = linkedSetOf<String>()
@@ -207,6 +235,20 @@ class PinyinDictionary(
         val composed = SentenceComposer.compose(
             input, options, transitions, maxOf(limit * 12, 120), initials = true
         )
+        return rankComposed(composed, limit)
+    }
+
+    private fun mixedCandidates(input: String, limit: Int): List<PinyinCandidate> {
+        val options = mixedMatcher.options(input)
+        val composed = SentenceComposer.compose(
+            input, options, emptyMap(), maxOf(limit * 12, 120), mixed = true
+        )
+        return rankComposed(composed, limit, mixed = true)
+    }
+
+    private fun rankComposed(
+        composed: List<PinyinCandidate>, limit: Int, mixed: Boolean = false
+    ): List<PinyinCandidate> {
         val pairs = composed.flatMap { candidate ->
             candidate.segments.zipWithNext { left, right ->
                 left.word.takeLast(1) + right.word.take(1)
@@ -224,12 +266,28 @@ class PinyinDictionary(
                 }
             }
         }
+        val pairFrequencies = mutableMapOf<String, Int>()
+        if (mixed) {
+            for (batch in pairs.chunked(400)) {
+                val placeholders = List(batch.size) { "?" }.joinToString(",")
+                database.rawQuery(
+                    "SELECT pair, frequency FROM mixed_pairs WHERE pair IN ($placeholders)",
+                    batch.toTypedArray()
+                ).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        pairFrequencies[cursor.getString(0)] = cursor.getInt(1)
+                    }
+                }
+            }
+        }
         val ranked = composed.sortedByDescending { candidate ->
             candidate.compositionScore + candidate.segments.zipWithNext { left, right ->
                 val pair = left.word.takeLast(1) + right.word.take(1)
-                pairRanks[pair]?.let { (ln(it.toDouble() + 1) - 6.0) * 2 } ?: -12.0
+                (pairRanks[pair]?.let { (ln(it.toDouble() + 1) - 6.0) * 2 } ?: -12.0) +
+                    (if (mixed) 4.0 * ln(pairFrequencies.getOrDefault(pair, 0) + 1.0) else 0.0)
             }.sum()
         }
+        if (mixed) return ranked.take(limit)
         val varied = ranked.distinctBy { it.word.take(2) }.take(limit)
         if (varied.size == limit) return varied
         return varied + ranked.filter { candidate -> varied.none { it.word == candidate.word } }

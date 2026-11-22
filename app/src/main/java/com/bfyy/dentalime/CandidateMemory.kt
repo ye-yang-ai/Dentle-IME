@@ -8,6 +8,17 @@ class CandidateMemory(context: Context, name: String = FILE_NAME) {
     fun count(pinyin: String, word: String): Int =
         preferences.getInt("$pinyin|$word", 0).coerceAtLeast(0)
 
+    fun remembered(pinyin: String, limit: Int): List<String> {
+        val prefix = "$pinyin|"
+        return preferences.all.asSequence()
+            .filter { (key, value) -> key.startsWith(prefix) && value is Int && value > 0 }
+            .sortedByDescending { (_, value) -> value as Int }
+            .map { (key, _) -> key.removePrefix(prefix) }
+            .filter { it.isNotEmpty() }
+            .take(limit)
+            .toList()
+    }
+
     fun record(pinyin: String, word: String) {
         if (pinyin.isEmpty()) return
         val current = count(pinyin, word)

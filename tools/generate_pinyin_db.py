@@ -12,6 +12,7 @@ import sys
 from pypinyin import Style, pinyin
 
 from build_initials_index import add_initials_index
+from build_mixed_index import add_mixed_index
 
 
 OUTPUT = Path(__file__).resolve().parents[1] / "app/src/main/assets/pinyin.db"
@@ -138,6 +139,7 @@ def main() -> None:
         connection.executemany("INSERT INTO transitions VALUES (?, ?, ?, ?)", transitions)
         connection.execute("CREATE INDEX transitions_pinyin ON transitions (pinyin)")
         add_initials_index(connection)
+        add_mixed_index(connection)
         connection.commit()
         connection.execute("VACUUM")
         print(

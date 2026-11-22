@@ -312,7 +312,7 @@ class DentalImeService : InputMethodService() {
                         listOf(edited) + found.filter { it.word != edited.word }.take(9)
                     } else found
                     if (edited == null) {
-                        sentenceDraft = found.firstOrNull { it.segments.size > 1 }
+                        sentenceDraft = found.firstOrNull()?.takeIf { it.segments.size > 1 }
                     }
                 }
                 updateCandidateViews()
@@ -331,7 +331,7 @@ class DentalImeService : InputMethodService() {
         value: String = if (editingSegment != null || draftEdited)
             sentenceDraft?.word ?: composition.toString()
         else candidates.firstOrNull()?.word ?: composition.toString(),
-        rememberSelection: Boolean = false
+        rememberSelection: Boolean = true
     ) {
         if (composition.isEmpty()) return
         if (rememberSelection && (sentenceDraft?.word == value || candidates.any { it.word == value })) {
