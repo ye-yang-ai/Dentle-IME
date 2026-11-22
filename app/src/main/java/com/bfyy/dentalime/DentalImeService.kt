@@ -42,6 +42,7 @@ class DentalImeService : InputMethodService() {
     private val selectedPrefixes = mutableListOf<SelectedPrefix>()
     private var remainingInitialPending = false
     private var candidates = emptyList<PinyinCandidate>()
+    private var completePinyin = false
     private val candidateConsumed = mutableListOf<Int>()
     private var sentenceDraft: PinyinCandidate? = null
     private var draftEdited = false
@@ -111,6 +112,7 @@ class DentalImeService : InputMethodService() {
         selectedPrefixes.clear()
         remainingInitialPending = false
         candidates = emptyList()
+        completePinyin = false
         candidateConsumed.clear()
         clearSentenceDraft()
         pendingKeys.clear()
@@ -134,6 +136,7 @@ class DentalImeService : InputMethodService() {
         selectedPrefixes.clear()
         remainingInitialPending = false
         candidates = emptyList()
+        completePinyin = false
         candidateConsumed.clear()
         clearSentenceDraft()
         pendingKeys.clear()
@@ -275,8 +278,18 @@ class DentalImeService : InputMethodService() {
         editBackLabel?.visibility = if (editingSegment != null) View.VISIBLE else View.GONE
         candidateLabels.forEachIndexed { index, label ->
             val candidate = candidates.getOrNull(index)
-            val raw = editingSegment == null && index == candidates.size && composition.isNotEmpty()
+            val singleLetter = editingSegment == null && composition.length == 1
+            val letterChoice = singleLetter && index in 28..29
+            val raw = editingSegment == null && !completePinyin && !singleLetter &&
+                index == candidates.size && composition.isNotEmpty()
             when {
+                letterChoice -> {
+                    val value = if (index == 28) composition.toString() else composition.toString().uppercase()
+                    label.text = value
+                    label.contentDescription = "$value，原样输入"
+                    label.setOnClickListener { commitComposition(value, rememberSelection = false) }
+                    label.visibility = View.VISIBLE
+                }
                 candidate != null -> {
                     label.text = candidate.word
                     label.contentDescription = "${candidate.word}，${candidate.pinyin}"
@@ -310,6 +323,7 @@ class DentalImeService : InputMethodService() {
         val segment = editingSegment?.let { sentenceDraft?.segments?.getOrNull(it) }
         val lookupInput = segment?.let { input.substring(it.start, it.end) } ?: input
         candidates = emptyList()
+        completePinyin = false
         candidateConsumed.clear()
         updateCandidateViews()
         if (input.isEmpty() || loaded == null) {
@@ -323,22 +337,33 @@ class DentalImeService : InputMethodService() {
         dictionaryWorker.execute {
             val result = runCatching {
                 if (segment != null) {
-                    loaded.lookupExact(lookupInput, if (lookupInput.length <= 5) 600 else 10)
+                    (if (loaded.isCompletePinyin(lookupInput)) loaded.lookupAllExact(lookupInput)
+                    else loaded.lookupExact(lookupInput))
                         .map { CandidateChoice(it, lookupInput.length) }
                 } else {
-                    // Short complete syllables are character lookups; long input is
-                    // sentence composition and should keep a smaller responsive list.
-                    val candidateLimit = if (input.length <= 5) 600 else 10
-                    val found = loaded.lookup(input, candidateLimit)
-                    val prefixes = loaded.lookupPrefixes(input)
-                    val wholeFirst = found.any {
-                        it.pinyin == input || it.segments.size > 1 ||
-                            loaded.memoryCount(input, it.word) > 0
+                    val isComplete = loaded.isCompletePinyin(input)
+                    val candidateLimit = if (input.length == 1) 28 else if (input.length <= 5) 600 else 10
+                    val prefixLimit = if (input.length <= 12) 600 else 10
+                    val exact = if (isComplete) loaded.lookupAllExact(input) else emptyList()
+                    val composed = if (exact.isEmpty()) loaded.lookup(input, candidateLimit)
+                        .filter { it.segments.isNotEmpty() && it.pinyin == input }
+                    else emptyList()
+                    val found = (exact + composed).distinctBy { it.word }
+                    val prefixes = if (isComplete) emptyList() else loaded.lookupPrefixes(input, prefixLimit)
+                    // Show a compact block of complete words first, then allow
+                    // progressive selection from the longest exact prefix.
+                    val complete = found.filter {
+                        it.pinyin == input && (it.word.length > 1 || it.segments.size > 1)
                     }
+                    val completeFirst = complete.take(7)
+                    val completeRest = complete.drop(7)
                     val choices = mutableListOf<CandidateChoice>()
-                    val ordered = if (wholeFirst) {
-                        found.map { CandidateChoice(it, input.length) } +
-                            prefixes.map { CandidateChoice(it.candidate, it.consumed) }
+                    val ordered = if (completeFirst.isNotEmpty()) {
+                        completeFirst.map { CandidateChoice(it, input.length) } +
+                            prefixes.map { CandidateChoice(it.candidate, it.consumed) } +
+                            completeRest.map { CandidateChoice(it, input.length) } +
+                            found.filter { it !in complete }
+                                .map { CandidateChoice(it, input.length) }
                     } else {
                         prefixes.map { CandidateChoice(it.candidate, it.consumed) } +
                             found.map { CandidateChoice(it, input.length) }
@@ -348,7 +373,11 @@ class DentalImeService : InputMethodService() {
                             choices.add(choice)
                         }
                     }
-                    choices.take(candidateLimit)
+                    if (isComplete) choices else {
+                        val fallback = loaded.lookup(input, candidateLimit)
+                            .map { CandidateChoice(it, input.length) }
+                        (choices + fallback).distinctBy { it.candidate.word }.take(candidateLimit)
+                    }
                 }
             }
             result.exceptionOrNull()?.let { Log.e("DentalImeService", "Candidate lookup failed", it) }
@@ -362,6 +391,7 @@ class DentalImeService : InputMethodService() {
                 if (segment != null) {
                     candidates = found
                 } else {
+                    completePinyin = loaded.isCompletePinyin(input)
                     val edited = sentenceDraft?.takeIf { draftEdited && it.pinyin == input }
                     candidates = if (edited != null) {
                         candidateConsumed.add(0, input.length)
@@ -371,7 +401,7 @@ class DentalImeService : InputMethodService() {
                         sentenceDraft = found.firstOrNull()?.takeIf { it.segments.size > 1 && it.pinyin == input }
                     }
                 }
-                ensureCandidateLabels(candidates.size)
+                ensureCandidateLabels(candidates.size + if (input.length == 1) 2 else 1)
                 updateCandidateViews()
                 drainPendingKeys()
             }

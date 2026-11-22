@@ -56,6 +56,28 @@ class PinyinDictionaryTest {
     }
 
     @Test
+    fun completePinyinReturnsEveryExactEntryWithoutPrefixMatches() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        PinyinDictionary(context, CandidateMemory(context, "all_exact_test")).use { dictionary ->
+            assertTrue(dictionary.isCompletePinyin("ya"))
+            assertTrue(dictionary.isCompletePinyin("yan"))
+            assertTrue(dictionary.isCompletePinyin("yang"))
+            assertFalse(dictionary.isCompletePinyin("y"))
+            val all = dictionary.lookupAllExact("yang")
+            val count = SQLiteDatabase.openDatabase(
+                context.noBackupFilesDir.resolve("pinyin.db").path,
+                null, SQLiteDatabase.OPEN_READONLY
+            ).use { database ->
+                database.rawQuery("SELECT count(*) FROM entries WHERE pinyin = ?", arrayOf("yang"))
+                    .use { cursor -> cursor.moveToFirst(); cursor.getInt(0) }
+            }
+            assertEquals(count, all.size)
+            assertTrue(all.all { it.pinyin == "yang" })
+            assertTrue(all.any { it.word == "阳" })
+        }
+    }
+
+    @Test
     fun selectedWordMovesAheadAndCanBeCleared() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val memory = CandidateMemory(context, "candidate_memory_test")
@@ -305,6 +327,8 @@ class PinyinDictionaryTest {
         PinyinDictionary(context, CandidateMemory(context, "single_initial_test")).use { dictionary ->
             val choices = dictionary.lookup("m", limit = 30)
             assertTrue(choices.map { it.word }.toString(), choices.size >= 20)
+            val yChoices = dictionary.lookup("y", limit = 28)
+            assertTrue(yChoices.toString(), yChoices.isNotEmpty())
             assertTrue(dictionary.lookup("mao").any { it.word == "猫" })
         }
     }

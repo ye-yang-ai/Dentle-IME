@@ -149,6 +149,23 @@ class PinyinDictionary(
 
     fun memoryCount(input: String, word: String): Int = memory.count(input, word)
 
+    fun isCompletePinyin(input: String): Boolean =
+        input.length > 1 && mixedMatcher.canSpellFully(input)
+
+    fun lookupAllExact(input: String): List<PinyinCandidate> {
+        if (input.isEmpty()) return emptyList()
+        val result = mutableListOf<PinyinCandidate>()
+        database.rawQuery(
+            "SELECT word FROM entries WHERE pinyin = ? ORDER BY rank DESC, freq DESC",
+            arrayOf(input)
+        ).use { cursor ->
+            while (cursor.moveToNext()) result.add(PinyinCandidate(cursor.getString(0), input))
+        }
+        return result.sortedWith(compareByDescending<PinyinCandidate> {
+            memory.count(input, it.word)
+        })
+    }
+
     fun lookupPrefixes(input: String, limit: Int = 10): List<PinyinPrefixCandidate> {
         if (input.length < 2) return emptyList()
         val result = mutableListOf<PinyinPrefixCandidate>()
