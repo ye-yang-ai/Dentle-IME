@@ -349,7 +349,12 @@ class DentalImeService : InputMethodService() {
                         .filter { it.segments.isNotEmpty() && it.pinyin == input }
                     else emptyList()
                     val found = (exact + composed).distinctBy { it.word }
-                    val prefixes = if (isComplete) emptyList() else loaded.lookupPrefixes(input, prefixLimit)
+                    val hasCompleteCandidate = found.any {
+                        it.word.length > 1 || it.segments.size > 1
+                    }
+                    val prefixes = if (hasCompleteCandidate || found.isEmpty()) {
+                        loaded.lookupPrefixes(input, prefixLimit)
+                    } else emptyList()
                     // Show a compact block of complete words first, then allow
                     // progressive selection from the longest exact prefix.
                     val complete = found.filter {
@@ -376,7 +381,9 @@ class DentalImeService : InputMethodService() {
                     if (isComplete) choices else {
                         val fallback = loaded.lookup(input, candidateLimit)
                             .map { CandidateChoice(it, input.length) }
-                        (choices + fallback).distinctBy { it.candidate.word }.take(candidateLimit)
+                        (choices + fallback).distinctBy { it.candidate.word }
+                            .sortedByDescending { loaded.memoryCount(input, it.candidate.word) }
+                            .take(candidateLimit)
                     }
                 }
             }

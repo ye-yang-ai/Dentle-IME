@@ -145,7 +145,19 @@ class PinyinDictionary(
         return sortByMemory(input, result, limit)
     }
 
-    fun recordSelection(input: String, word: String) = memory.record(input, word)
+    fun recordSelection(input: String, word: String) {
+        memory.record(input, word)
+        if (input.length <= 1 || word.isEmpty() || !mixedMatcher.canSpellFully(input)) return
+        val indexedInitials = database.rawQuery(
+            "SELECT initials FROM entries WHERE pinyin = ? AND word = ? LIMIT 1",
+            arrayOf(input, word)
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+        val initials = indexedInitials?.takeIf { it.isNotEmpty() }
+            ?: mixedMatcher.initialsFor(input, word.codePointCount(0, word.length))
+        if (initials != null && initials != input && initials.length > 1) {
+            memory.record(initials, word)
+        }
+    }
 
     fun memoryCount(input: String, word: String): Int = memory.count(input, word)
 
@@ -161,9 +173,10 @@ class PinyinDictionary(
         ).use { cursor ->
             while (cursor.moveToNext()) result.add(PinyinCandidate(cursor.getString(0), input))
         }
-        return result.sortedWith(compareByDescending<PinyinCandidate> {
-            memory.count(input, it.word)
-        })
+        val remembered = memory.remembered(input, 600)
+            .map { PinyinCandidate(it, input) }
+        return (remembered + result).distinctBy { it.word }
+            .sortedWith(compareByDescending<PinyinCandidate> { memory.count(input, it.word) })
     }
 
     fun lookupPrefixes(input: String, limit: Int = 10): List<PinyinPrefixCandidate> {

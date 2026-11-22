@@ -78,6 +78,23 @@ class PinyinDictionaryTest {
     }
 
     @Test
+    fun completePinyinKeepsPrefixChoicesAndRecallsComposedMemory() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val memory = CandidateMemory(context, "complete_prefix_memory_test")
+        memory.clear()
+        try {
+            PinyinDictionary(context, memory).use { dictionary ->
+                val prefixes = dictionary.lookupPrefixes("siying", limit = 600)
+                assertTrue(prefixes.toString(), prefixes.any { it.consumed == 2 && it.candidate.word == "私" })
+                dictionary.recordSelection("siying", "私英")
+                assertEquals("私英", dictionary.lookupAllExact("siying").first().word)
+            }
+        } finally {
+            memory.clear()
+        }
+    }
+
+    @Test
     fun selectedWordMovesAheadAndCanBeCleared() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val memory = CandidateMemory(context, "candidate_memory_test")
@@ -93,6 +110,27 @@ class PinyinDictionaryTest {
                 assertEquals("正畸", dictionary.lookup("zhengji").first().word)
                 memory.clear()
                 assertEquals("征集", dictionary.lookup("zhengji").first().word)
+            }
+        } finally {
+            memory.clear()
+        }
+    }
+
+    @Test
+    fun fullPinyinSelectionIsRememberedUnderInitials() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val memory = CandidateMemory(context, "full_to_initials_test")
+        memory.clear()
+        try {
+            PinyinDictionary(context, memory).use { dictionary ->
+                dictionary.recordSelection("yangye", "杨烨")
+                assertEquals("杨烨", dictionary.lookup("yy").first().word)
+                assertEquals(1, dictionary.memoryCount("yy", "杨烨"))
+            }
+            PinyinDictionary(context, CandidateMemory(context, "full_to_initials_test")).use { dictionary ->
+                assertEquals("杨烨", dictionary.lookup("yy").first().word)
+                memory.clear()
+                assertEquals(0, dictionary.memoryCount("yy", "杨烨"))
             }
         } finally {
             memory.clear()
